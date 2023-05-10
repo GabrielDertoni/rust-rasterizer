@@ -1,7 +1,8 @@
-use std::ops::{Index, IndexMut};
 use std::marker::PhantomData;
+use std::ops::{Index, IndexMut};
 
-use crate::{Pixel, ScreenPos};
+use crate::vec::Vec4;
+use crate::Pixel;
 
 pub type PixelBuf<'a> = MatrixSliceMut<'a, Pixel>;
 
@@ -34,17 +35,27 @@ impl<'a, E> MatrixSliceMut<'a, E> {
         unsafe { std::slice::from_raw_parts_mut(self.ptr, self.width * self.height) }
     }
 
-    pub fn ndc_to_screen(&self, [x, y, z]: [f32; 3]) -> ScreenPos {
-        (
-            ((x + 1.0) * self.width  as f32 / 2.0) as i32,
-            ((1.0 - y) * self.height as f32 / 2.0) as i32,
-            z
-        )
+    pub fn ndc_to_screen(&self, p: Vec4) -> Vec4 {
+        /*
+        p
+            // flip y axis and scale range from [-1, 1] -> [-0.5, 0.5]
+            .hom_scale(Vec3::from([0.5, -0.5, 1.0]))
+            // translate range from [-0.5, 0.5] -> [0.0, 1.0]
+            .hom_translate(Vec3::from([0.5, 0.5, 0.0]))
+            // scale range from [0.0, 1.0] -> [0.0, width]
+            .hom_scale(Vec3::from([self.width as f32, self.height as f32, 1.0]))
+        */
+        Vec4::from([
+            (p.x + 1.0) * self.width as f32 / 2.0,
+            (1.0 - p.y) * self.height as f32 / 2.0,
+            p.z,
+            1.0,
+        ])
     }
 
     pub fn borrow<'b>(&mut self) -> MatrixSliceMut<'b, E>
     where
-        'a: 'b
+        'a: 'b,
     {
         MatrixSliceMut {
             width: self.width,
