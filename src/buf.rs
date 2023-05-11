@@ -1,17 +1,44 @@
 use std::marker::PhantomData;
-use std::ops::{Index, IndexMut};
+use std::ops::{Bound, Index, IndexMut, RangeBounds};
 
 use crate::vec::Vec4;
 use crate::Pixel;
 
 pub type PixelBuf<'a> = MatrixSliceMut<'a, Pixel>;
 
+#[derive(Clone, Copy)]
+pub struct MatrixSlice<'a, E> {
+    pub width: usize,
+    pub height: usize,
+    pub stride: usize,
+    ptr: *const E,
+    _marker: PhantomData<&'a [E]>,
+}
+
+impl<'a, E> MatrixSlice<'a, E> {
+    pub fn new(buf: &'a [E], width: usize, height: usize) -> Self {
+        assert_eq!(buf.len(), width * height);
+        let ptr = buf.as_ptr();
+        MatrixSlice {
+            width,
+            height,
+            stride: width,
+            ptr,
+            _marker: PhantomData,
+        }
+    }
+
+    pub fn as_slice(&self) -> &[E] {
+        unsafe { std::slice::from_raw_parts(self.ptr, self.width * self.height) }
+    }
+}
+
 pub struct MatrixSliceMut<'a, E> {
     pub width: usize,
     pub height: usize,
     pub stride: usize,
     ptr: *mut E,
-    _marker: PhantomData<&'a [E]>,
+    _marker: PhantomData<&'a mut [E]>,
 }
 
 impl<'a, E> MatrixSliceMut<'a, E> {
@@ -53,15 +80,49 @@ impl<'a, E> MatrixSliceMut<'a, E> {
         ])
     }
 
-    pub fn borrow<'b>(&mut self) -> MatrixSliceMut<'b, E>
-    where
-        'a: 'b,
-    {
+    pub fn borrow<'b>(&'b mut self) -> MatrixSliceMut<'b, E> {
         MatrixSliceMut {
             width: self.width,
             height: self.height,
             stride: self.stride,
             ptr: self.ptr,
+            _marker: PhantomData,
+        }
+    }
+
+    pub fn slice_mut<'b, B: RangeBounds<usize>>(
+        &'b mut self,
+        rows: B,
+        cols: B,
+    ) -> MatrixSliceMut<'b, E> {
+        let start_row = match rows.start_bound() {
+            Bound::Included(&start) => start,
+            Bound::Excluded(&start) => start + 1,
+            Bound::Unbounded => 0,
+        };
+        let end_row = match rows.end_bound() {
+            Bound::Included(&end) => end + 1,
+            Bound::Excluded(&end) => end,
+            Bound::Unbounded => self.height,
+        };
+        let start_col = match cols.start_bound() {
+            Bound::Included(&start) => start,
+            Bound::Excluded(&start) => start + 1,
+            Bound::Unbounded => 0,
+        };
+        let end_col = match cols.end_bound() {
+            Bound::Included(&end) => end + 1,
+            Bound::Excluded(&end) => end,
+            Bound::Unbounded => self.width,
+        };
+        if end_row >= self.height || end_col >= self.width {
+            panic!("out of bounds");
+        }
+        MatrixSliceMut {
+            width: end_col - start_col,
+            height: end_row - start_row,
+            stride: self.stride,
+            ptr: unsafe { self.ptr.add(start_row * self.stride + start_col) },
             _marker: PhantomData,
         }
     }
@@ -75,7 +136,7 @@ impl<'a, E> Index<(usize, usize)> for MatrixSliceMut<'a, E> {
             panic!("out of bounds");
         }
         unsafe {
-            let idx = y * self.width + x;
+            let idx = y * self.stride + x;
             &*self.ptr.add(idx)
         }
     }
@@ -87,7 +148,7 @@ impl<'a, E> IndexMut<(usize, usize)> for MatrixSliceMut<'a, E> {
             panic!("out of bounds");
         }
         unsafe {
-            let idx = y * self.width + x;
+            let idx = y * self.stride + x;
             &mut *self.ptr.add(idx)
         }
     }

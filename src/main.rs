@@ -42,7 +42,6 @@ fn main() {
 
     let mut start = Instant::now();
     event_loop.run(move |event, _, control_flow| {
-        // control_flow.set_poll();
         control_flow.set_wait();
 
         match event {
@@ -80,7 +79,7 @@ struct World {
     vert: Vec<Vec4>,
     tris: Vec<[u32; 3]>,
     depth_buf: Vec<f32>,
-    acc: f32,
+    theta: f32,
     is_paused: bool,
 }
 
@@ -109,7 +108,7 @@ impl World {
             tris,
             vert,
             depth_buf: vec![0.0; (WIDTH * HEIGHT) as usize],
-            acc: 0.0,
+            theta: 0.0,
             is_paused: true,
         }
     }
@@ -120,7 +119,7 @@ impl World {
         let mut pixels = buf::PixelBuf::new(pixels, WIDTH as usize, HEIGHT as usize);
 
         if !self.is_paused {
-            self.acc += dt.as_secs_f32() * std::f32::consts::PI / 4.0;
+            self.theta += dt.as_secs_f32() * std::f32::consts::PI / 4.0;
         }
 
         clear_color(pixels.borrow(), 0x00_00_00_ff);
@@ -132,14 +131,32 @@ impl World {
             *d = f32::MIN;
         }
 
-        let model = Vec3::from([-0.5, -0.5, 0.0]).to_translation()
-            * Mat4x4::rotation_x(self.acc + std::f32::consts::PI / 4.0)
-            * Vec3::from([0.3, 1.0, 1.0]).to_scale();
+        let model = Mat4x4::rotation_x(self.theta);
 
-        let vert: Vec<_> = self.vert.iter().copied().map(|v| model * v).collect();
+        let eye = Vec3::from([0.0, 0.0, 1.0]);
+        let look_at = Vec3::zero();
+        let up = Vec3::from([0.0, -1.0, 0.0]);
+
+        let camera_z = (eye - look_at).normalized();
+        let camera_x = up.cross(camera_z);
+        let camera_y = camera_z.cross(camera_x);
+
+        let view = Mat4x4::from([
+            [camera_x.x, camera_x.y, camera_x.z, -eye.x],
+            [camera_y.x, camera_y.y, camera_y.z, -eye.y],
+            [camera_z.x, camera_z.y, camera_z.z, -eye.z],
+            [0.0, 0.0, 0.0, 1.0],
+        ]);
+
+        let vert: Vec<_> = self
+            .vert
+            .iter()
+            .copied()
+            .map(|v| view * model * v)
+            .collect();
 
         for [p0, p1, p2] in triangles_iter(&vert, &self.tris) {
-            let cross = (p0 - p1).xyz().cross((p2 - p1).xyz()).normalize();
+            let cross = (p0 - p1).xyz().cross((p2 - p1).xyz()).normalized();
             let color = 256.0 * (cross + Mat::one()) / 2.0;
             let color = u32::from_be_bytes([color.x as u8, color.y as u8, color.z as u8, 0xff]);
 

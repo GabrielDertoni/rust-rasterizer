@@ -2,6 +2,7 @@ use std::ops::{
     Add, AddAssign, Deref, DerefMut, Div, DivAssign, Index, IndexMut, Mul, MulAssign, Neg, Sub,
     SubAssign,
 };
+use std::simd::{LaneCount, Simd, StdFloat, SupportedLaneCount};
 
 pub type Mat4x4 = Mat<f32, 4, 4>;
 
@@ -60,10 +61,10 @@ impl<T: Num> Mat<T, 4, 4> {
         let z = T::zero();
         let cos = theta.cos();
         let sin = theta.sin();
-        Mat([[ cos, -sin,   z,   z],
-             [ sin,  cos,   z,   z],
-             [   z,    z,   o,   z],
-             [   z,    z,   z,   o]])
+        Mat([[ cos,-sin,   z,   z],
+             [ sin, cos,   z,   z],
+             [   z,   z,   o,   z],
+             [   z,   z,   z,   o]])
     }
 }
 
@@ -87,7 +88,7 @@ impl<T: Num, const N: usize> Vec<T, N> {
         self.mag_sq().sqrt()
     }
 
-    pub fn normalize(self) -> Self {
+    pub fn normalized(self) -> Self {
         self / self.mag()
     }
 }
@@ -375,5 +376,36 @@ impl Num for f64 {
 
     fn cos(self) -> Self {
         self.cos()
+    }
+}
+
+impl<const N: usize> Num for Simd<f32, N>
+where
+    LaneCount<N>: SupportedLaneCount,
+{
+    fn zero() -> Self {
+        Simd::splat(0.0)
+    }
+
+    fn one() -> Self {
+        Simd::splat(1.0)
+    }
+
+    fn sqrt(self) -> Self {
+        StdFloat::sqrt(self)
+    }
+
+    fn sin(mut self) -> Self {
+        for el in self.as_mut_array() {
+            *el = el.sin();
+        }
+        self
+    }
+
+    fn cos(mut self) -> Self {
+        for el in self.as_mut_array() {
+            *el = el.cos();
+        }
+        self
     }
 }

@@ -37,7 +37,7 @@ pub fn draw_triangle_outline(
     draw_line(p0, p2, color, pixels.borrow(), depth_buf.borrow());
 }
 
-pub fn draw_triangle(
+pub fn draw_triangle2(
     p0: Vec4,
     p1: Vec4,
     p2: Vec4,
@@ -143,14 +143,18 @@ pub fn draw_triangles(
     }
 }
 
-pub fn draw_triangle2(
-    p0: ScreenPos,
-    p1: ScreenPos,
-    p2: ScreenPos,
+pub fn draw_triangle(
+    p0: Vec4,
+    p1: Vec4,
+    p2: Vec4,
     color: u32,
     mut pixels: PixelBuf,
     mut depth_buf: MatrixSliceMut<f32>,
 ) {
+    let p0 = to_screen_pos(p0);
+    let p1 = to_screen_pos(p1);
+    let p2 = to_screen_pos(p2);
+
     let min_x = p0.0.min(p1.0).min(p2.0).max(0);
     let min_y = p0.1.min(p1.1).min(p2.1).max(0);
     let max_x = p0.0.max(p1.0).max(p2.0).min(pixels.width as i32);
@@ -159,9 +163,9 @@ pub fn draw_triangle2(
     for y in min_y..=max_y {
         for x in min_x..=max_x {
             let w = (
-                orient_2d((x, y), (p0.0, p0.1), (p1.0, p1.1)),
-                orient_2d((x, y), (p1.0, p1.1), (p2.0, p2.1)),
-                orient_2d((x, y), (p2.0, p2.1), (p0.0, p0.1)),
+                orient_2d((p1.0, p1.1), (p0.0, p0.1), (x, y)),
+                orient_2d((p2.0, p2.1), (p1.0, p1.1), (x, y)),
+                orient_2d((p0.0, p0.1), (p2.0, p2.1), (x, y)),
             );
             if w.0 >= 0 && w.1 >= 0 && w.2 >= 0 {
                 let depth = triangle_depth((x, y), p0, p1, p2);
