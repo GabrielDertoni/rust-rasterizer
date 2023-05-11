@@ -115,7 +115,7 @@ impl<'a, E> MatrixSliceMut<'a, E> {
             Bound::Excluded(&end) => end,
             Bound::Unbounded => self.width,
         };
-        if end_row >= self.height || end_col >= self.width {
+        if end_row > self.height || end_col > self.width {
             panic!("out of bounds");
         }
         MatrixSliceMut {
