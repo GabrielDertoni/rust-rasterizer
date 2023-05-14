@@ -10,21 +10,22 @@ use winit::{
     window::WindowBuilder,
 };
 
-pub mod buf;
-pub mod prim3d;
-pub mod vec;
-
-use vec::{Mat, Vec3, Vec4};
-
-use crate::vec::Mat4x4;
+use rasterization::{
+    triangles_iter,
+    clear_color,
+    obj,
+    buf,
+    prim3d,
+    vec::{Mat, Vec3, Vec4, Mat4x4, Vec2i},
+    swizzle,
+};
 
 const WIDTH: u32 = 720;
 const HEIGHT: u32 = 720;
 
-pub type ScreenPos = (i32, i32, f32);
-pub type Pixel = [u8; 4];
-
 fn main() {
+    debug();
+    return;
     let event_loop = EventLoop::new();
     let window = WindowBuilder::new()
         .with_title("rasterizer")
@@ -42,7 +43,8 @@ fn main() {
 
     let mut start = Instant::now();
     event_loop.run(move |event, _, control_flow| {
-        control_flow.set_wait();
+        // control_flow.set_wait();
+        control_flow.set_poll();
 
         match event {
             Event::WindowEvent {
@@ -85,25 +87,7 @@ struct World {
 
 impl World {
     fn new() -> Self {
-        let obj = std::fs::read_to_string("teapot.obj").unwrap();
-        let mut vert = Vec::new();
-        let mut tris = Vec::new();
-        for line in obj.lines() {
-            let mut it = line.split_ascii_whitespace();
-            match it.next() {
-                Some("v") => {
-                    let mut it = it.map(|el| el.parse::<f32>().unwrap() / 4.0);
-                    let [x, y, z] = it.next_chunk().unwrap();
-                    vert.push(Vec4::from([x, y, z, 1.0]));
-                }
-                Some("f") => {
-                    let mut it = it.map(|el| el.parse::<u32>().unwrap() - 1);
-                    tris.push(it.next_chunk().unwrap());
-                }
-                _ => continue,
-            }
-        }
-
+        let obj::Obj { vert, tris } = obj::load_obj("teapot.obj".as_ref()).unwrap();
         World {
             tris,
             vert,
@@ -156,15 +140,13 @@ impl World {
             .collect();
 
         for [p0, p1, p2] in triangles_iter(&vert, &self.tris) {
-            let cross = (p0 - p1).xyz().cross((p2 - p1).xyz()).normalized();
-            let color = 256.0 * (cross + Mat::one()) / 2.0;
-            let color = u32::from_be_bytes([color.x as u8, color.y as u8, color.z as u8, 0xff]);
+            let color = (p0 - p1).xyz().cross((p2 - p1).xyz()).normalized();
 
             prim3d::draw_triangle(
                 pixels.ndc_to_screen(p0),
                 pixels.ndc_to_screen(p1),
                 pixels.ndc_to_screen(p2),
-                color,
+                |_| Vec4::from([color.x, color.y, color.z, 1.0]),
                 pixels.borrow(),
                 depth_buf.borrow(),
             )
@@ -177,16 +159,38 @@ impl World {
     }
 }
 
-pub fn triangles_iter<'a>(
-    vert: &'a [Vec4],
-    tris: &'a [[u32; 3]],
-) -> impl Iterator<Item = [Vec4; 3]> + 'a {
-    tris.iter()
-        .map(|&[p0, p1, p2]| [vert[p0 as usize], vert[p1 as usize], vert[p2 as usize]])
-}
+fn debug() {
+    use image::{ImageBuffer, ImageFormat, Rgba};
 
-fn clear_color(pixels: buf::PixelBuf, color: u32) {
-    for pixel in pixels.as_slice_mut() {
-        *pixel = color.to_be_bytes();
+    let mut im_buf = ImageBuffer::<Rgba<u8>, _>::new(WIDTH, HEIGHT);
+    let (pixels, _)= im_buf.as_chunks_mut::<4>();
+    let mut pixels = buf::PixelBuf::new(pixels, WIDTH as usize, HEIGHT as usize);
+
+    let mut depth_buf = vec![0.0; (WIDTH * HEIGHT) as usize];
+    let mut depth_buf =
+        buf::MatrixSliceMut::new(&mut depth_buf, WIDTH as usize, HEIGHT as usize);
+
+    for d in depth_buf.as_slice_mut() {
+        *d = f32::MIN;
     }
+
+    clear_color(pixels.borrow(), 0x00_00_00_ff);
+
+    let obj = obj::load_obj("teapot.obj".as_ref()).unwrap();
+
+    for [p0, p1, p2] in triangles_iter(&obj.vert, &obj.tris) {
+        let color = (p0 - p1).xyz().cross((p2 - p1).xyz()).normalized();
+
+        prim3d::draw_triangle(
+            pixels.ndc_to_screen(p0),
+            pixels.ndc_to_screen(p1),
+            pixels.ndc_to_screen(p2),
+            |_| swizzle!(color, [x, y, z, 1.0]),
+            pixels.borrow(),
+            depth_buf.borrow(),
+        )
+    }
+
+    let mut f = std::fs::File::create("out.png").unwrap();
+    im_buf.write_to(&mut f, ImageFormat::Png).unwrap();
 }

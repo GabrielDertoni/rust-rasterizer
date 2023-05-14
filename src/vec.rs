@@ -2,7 +2,7 @@ use std::ops::{
     Add, AddAssign, Deref, DerefMut, Div, DivAssign, Index, IndexMut, Mul, MulAssign, Neg, Sub,
     SubAssign,
 };
-use std::simd::{LaneCount, Simd, StdFloat, SupportedLaneCount};
+use std::simd::{LaneCount, Simd, SimdElement, StdFloat, SupportedLaneCount};
 
 pub type Mat4x4 = Mat<f32, 4, 4>;
 
@@ -10,13 +10,69 @@ pub type Mat4x4 = Mat<f32, 4, 4>;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Mat<T, const M: usize, const N: usize>([[T; N]; M]);
 
-impl<T: Num, const M: usize, const N: usize> Mat<T, M, N> {
-    pub fn zero() -> Self {
-        Mat([[T::zero(); N]; M])
+impl<T: Copy, const M: usize, const N: usize> Mat<T, M, N> {
+    pub fn map<U>(self, mut f: impl FnMut(T) -> U) -> Mat<U, M, N> {
+        Mat(self.0.map(|row| row.map(&mut f)))
     }
 
-    pub fn one() -> Self {
-        Mat([[T::one(); N]; M])
+    /// # Panics
+    ///
+    /// If `f` panics. Note that in that case, some `R` values that were initialized might not have their destructors called.
+    #[inline(always)]
+    pub fn zip_with<U: Copy, R>(
+        self,
+        rhs: Mat<U, M, N>,
+        mut f: impl FnMut(T, U) -> R,
+    ) -> Mat<R, M, N> {
+        use std::mem::{MaybeUninit, transmute, transmute_copy};
+
+        // SAFETY: Transposing the `MaybeUninit` to the inner type is safe, since we still can't access
+        // any real data that might be uninitialized.
+        let mut arr = unsafe { MaybeUninit::<[[MaybeUninit<R>; N]; M]>::uninit().assume_init() };
+        for i in 0..M {
+            for j in 0..N {
+                arr[i][j].write(f(self.0[i][j], rhs.0[i][j]));
+            }
+        }
+
+        // SAFETY: Equivalent to `assume_init`, we have initialized every element.
+        unsafe { Mat(transmute_copy(&arr)) }
+    }
+}
+
+impl<const M: usize, const N: usize> Mat<f32, M, N> {
+    pub fn to_i32(self) -> Mat<i32, M, N> {
+        self.map(|el| el as i32)
+    }
+
+    pub fn to_u8(self) -> Mat<u8, M, N> {
+        self.map(|el| el as u8)
+    }
+}
+
+impl<T: Copy + Ord, const M: usize, const N: usize> Mat<T, M, N> {
+    pub fn min(self, rhs: Self) -> Self {
+        self.zip_with(rhs, |lhs, rhs| std::cmp::min(lhs, rhs))
+    }
+
+    pub fn max(self, rhs: Self) -> Self {
+        self.zip_with(rhs, |lhs, rhs| std::cmp::max(lhs, rhs))
+    }
+}
+
+impl<T: Num, const M: usize, const N: usize> Mat<T, M, N> {
+    #[inline(always)]
+    pub fn zero() -> Self { Mat([[T::zero(); N]; M]) }
+
+    #[inline(always)]
+    pub fn one()  -> Self { Mat([[T::one() ; N]; M]) }
+
+    #[inline(always)]
+    pub fn repeat(el: T) -> Self
+    where
+        T: Copy,
+    {
+        Mat([[el; N]; M])
     }
 }
 
@@ -30,7 +86,7 @@ impl<T: Num, const N: usize> Mat<T, N, N> {
     }
 }
 
-impl<T: Num> Mat<T, 4, 4> {
+impl<T: Float> Mat<T, 4, 4> {
     #[rustfmt::skip]
     pub fn rotation_x(theta: T) -> Self {
         let o = T::one();
@@ -75,15 +131,28 @@ impl<T, const M: usize, const N: usize> From<[[T; N]; M]> for Mat<T, M, N> {
 }
 
 pub type Vec<T, const N: usize> = Mat<T, N, 1>;
+
 pub type Vec2 = Vec<f32, 2>;
 pub type Vec3 = Vec<f32, 3>;
 pub type Vec4 = Vec<f32, 4>;
+
+pub type Vec2i = Vec<i32, 2>;
+pub type Vec3i = Vec<i32, 3>;
+pub type Vec4i = Vec<i32, 4>;
+
+impl<T, const N: usize> Vec<T, N> {
+    pub fn to_array(&self) -> [T; N] {
+        unsafe { std::mem::transmute_copy(&self.0) }
+    }
+}
 
 impl<T: Num, const N: usize> Vec<T, N> {
     pub fn mag_sq(&self) -> T {
         self.0.iter().map(|&[coord]| coord * coord).sum()
     }
+}
 
+impl<T: Float, const N: usize> Vec<T, N> {
     pub fn mag(&self) -> T {
         self.mag_sq().sqrt()
     }
@@ -100,10 +169,6 @@ impl<T: Num> Vec<T, 3> {
             self.x * rhs.z - self.z * rhs.x,
             self.x * rhs.y - self.y * rhs.x,
         ])
-    }
-
-    pub fn to_rotation(self) -> Mat<T, 4, 4> {
-        Mat::rotation_x(self.x) * Mat::rotation_y(self.y) * Mat::rotation_z(self.z)
     }
 
     pub fn to_translation(self) -> Mat<T, 4, 4> {
@@ -125,6 +190,12 @@ impl<T: Num> Vec<T, 3> {
     }
 }
 
+impl<T: Float> Vec<T, 3> {
+    pub fn to_rotation(self) -> Mat<T, 4, 4> {
+        Mat::rotation_x(self.x) * Mat::rotation_y(self.y) * Mat::rotation_z(self.z)
+    }
+}
+
 impl<T: Num> Vec<T, 4> {
     #[inline(always)]
     pub fn hom_translate(self, translation: Vec<T, 3>) -> Self {
@@ -132,13 +203,15 @@ impl<T: Num> Vec<T, 4> {
     }
 
     #[inline(always)]
-    pub fn hom_rotate(self, rotation: Vec<T, 3>) -> Self {
-        rotation.to_rotation() * self
-    }
-
-    #[inline(always)]
     pub fn hom_scale(self, scale: Vec<T, 3>) -> Self {
         scale.to_scale() * self
+    }
+}
+
+impl<T: Float> Vec<T, 4> {
+    #[inline(always)]
+    pub fn hom_rotate(self, rotation: Vec<T, 3>) -> Self {
+        rotation.to_rotation() * self
     }
 }
 
@@ -222,7 +295,7 @@ macro_rules! impl_mul_lhs {
     };
 }
 
-impl_mul_lhs!(f32, f64);
+impl_mul_lhs!(f32, f64, i32);
 
 impl<T: Num, const M: usize, const K: usize, const N: usize> Mul<Mat<T, K, N>> for Mat<T, M, K> {
     type Output = Mat<T, M, N>;
@@ -254,64 +327,208 @@ impl<T: Num, const M: usize, const N: usize> Div<T> for Mat<T, M, N> {
     }
 }
 
-impl<T: Num> Deref for Vec<T, 3> {
-    type Target = XYZ<T>;
+mod swizzling {
+    use super::Vec;
 
-    fn deref(&self) -> &XYZ<T> {
-        unsafe { std::mem::transmute(self) }
-    }
-}
+    use std::ops::{Deref, DerefMut};
 
-impl<T: Num> DerefMut for Vec<T, 3> {
-    fn deref_mut(&mut self) -> &mut XYZ<T> {
-        unsafe { std::mem::transmute(self) }
-    }
-}
-
-impl<T: Num> Deref for Vec<T, 4> {
-    type Target = XYZW<T>;
-
-    fn deref(&self) -> &XYZW<T> {
-        unsafe { std::mem::transmute(self) }
-    }
-}
-
-impl<T: Num> DerefMut for Vec<T, 4> {
-    fn deref_mut(&mut self) -> &mut XYZW<T> {
-        unsafe { std::mem::transmute(self) }
-    }
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct XYZ<T> {
-    pub x: T,
-    pub y: T,
-    pub z: T,
-}
-
-impl<T: Copy> XYZ<T> {
-    pub fn xy(&self) -> Vec<T, 2> {
-        Vec::from([self.x, self.y])
-    }
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct XYZW<T> {
-    pub x: T,
-    pub y: T,
-    pub z: T,
-    pub w: T,
-}
-
-impl<T: Copy> XYZW<T> {
-    pub fn xy(&self) -> Vec<T, 2> {
-        Vec::from([self.x, self.y])
+    #[macro_export]
+    macro_rules! __vec_ident_or_expr {
+        ($self:expr; $field:ident) => { $self.$field };
+        ($self:expr; $e:expr) => { $e };
     }
 
-    pub fn xyz(&self) -> Vec<T, 3> {
-        Vec::from([self.x, self.y, self.z])
+    #[macro_export]
+    macro_rules! swizzle {
+        ($self:expr, [$($field:tt),*]) => {
+            $crate::vec::Vec::from([$($crate::__vec_ident_or_expr!($self; $field)),*])
+        };
+    }
+
+    impl<T> Deref for Vec<T, 1> {
+        type Target = X<T>;
+
+        #[inline(always)]
+        fn deref(&self) -> &X<T> {
+            unsafe { std::mem::transmute(self) }
+        }
+    }
+
+    impl<T> DerefMut for Vec<T, 1> {
+        #[inline(always)]
+        fn deref_mut(&mut self) -> &mut X<T> {
+            unsafe { std::mem::transmute(self) }
+        }
+    }
+
+    impl<T> Deref for Vec<T, 2> {
+        type Target = XY<T>;
+
+        #[inline(always)]
+        fn deref(&self) -> &XY<T> {
+            unsafe { std::mem::transmute(self) }
+        }
+    }
+
+    impl<T> DerefMut for Vec<T, 2> {
+        #[inline(always)]
+        fn deref_mut(&mut self) -> &mut XY<T> {
+            unsafe { std::mem::transmute(self) }
+        }
+    }
+
+    impl<T> Deref for Vec<T, 3> {
+        type Target = XYZ<T>;
+
+        #[inline(always)]
+        fn deref(&self) -> &XYZ<T> {
+            unsafe { std::mem::transmute(self) }
+        }
+    }
+
+    impl<T> DerefMut for Vec<T, 3> {
+        #[inline(always)]
+        fn deref_mut(&mut self) -> &mut XYZ<T> {
+            unsafe { std::mem::transmute(self) }
+        }
+    }
+
+    impl<T> Deref for Vec<T, 4> {
+        type Target = XYZW<T>;
+
+        #[inline(always)]
+        fn deref(&self) -> &XYZW<T> {
+            unsafe { std::mem::transmute(self) }
+        }
+    }
+
+    impl<T> DerefMut for Vec<T, 4> {
+        #[inline(always)]
+        fn deref_mut(&mut self) -> &mut XYZW<T> {
+            unsafe { std::mem::transmute(self) }
+        }
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    pub struct X<T> {
+        pub x: T,
+    }
+
+    impl<T: Copy> XY<T> {
+        #[inline(always)]
+        pub fn x(&self) -> Vec<T, 1> {
+            Vec::from([self.x])
+        }
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    pub struct XY<T> {
+        _x: X<T>,
+        pub y: T,
+    }
+
+    impl<T: Copy> XY<T> {
+        #[inline(always)]
+        pub fn xy(&self) -> Vec<T, 2> {
+            Vec::from([self.x, self.y])
+        }
+
+        #[inline(always)]
+        pub fn yx(&self) -> Vec<T, 2> {
+            Vec::from([self.y, self.x])
+        }
+    }
+
+    impl<T> Deref for XY<T> {
+        type Target = X<T>;
+
+        fn deref(&self) -> &X<T> {
+            &self._x
+        }
+    }
+
+    impl<T> DerefMut for XY<T> {
+        fn deref_mut(&mut self) -> &mut X<T> {
+            &mut self._x
+        }
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    pub struct XYZ<T> {
+        _xy: XY<T>,
+        pub z: T,
+    }
+
+    impl<T: Copy> XYZ<T> {
+        #[inline(always)]
+        pub fn xyz(&self) -> Vec<T, 3> {
+            Vec::from([self.x, self.y, self.z])
+        }
+
+        #[inline(always)]
+        pub fn xzy(&self) -> Vec<T, 3> {
+            Vec::from([self.x, self.z, self.y])
+        }
+
+        #[inline(always)]
+        pub fn yxz(&self) -> Vec<T, 3> {
+            Vec::from([self.y, self.x, self.z])
+        }
+
+        #[inline(always)]
+        pub fn yzx(&self) -> Vec<T, 3> {
+            Vec::from([self.y, self.z, self.x])
+        }
+
+        #[inline(always)]
+        pub fn zxy(&self) -> Vec<T, 3> {
+            Vec::from([self.z, self.x, self.y])
+        }
+
+        #[inline(always)]
+        pub fn zyx(&self) -> Vec<T, 3> {
+            Vec::from([self.z, self.y, self.x])
+        }
+    }
+
+    impl<T> Deref for XYZ<T> {
+        type Target = XY<T>;
+
+        fn deref(&self) -> &XY<T>  {
+            &self._xy
+        }
+    }
+
+    impl<T> DerefMut for XYZ<T> {
+        fn deref_mut(&mut self) -> &mut XY<T> {
+            &mut self._xy
+        }
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    pub struct XYZW<T> {
+        _xyz: XYZ<T>,
+        pub w: T,
+    }
+
+    impl<T> Deref for XYZW<T> {
+        type Target = XYZ<T>;
+
+        #[inline(always)]
+        fn deref(&self) -> &XYZ<T> {
+            &self._xyz
+        }
+    }
+
+    impl<T> DerefMut for XYZW<T> {
+        #[inline(always)]
+        fn deref_mut(&mut self) -> &mut XYZ<T> {
+            &mut self._xyz
+        }
     }
 }
 
@@ -330,82 +547,105 @@ pub trait Num:
 {
     fn zero() -> Self;
     fn one() -> Self;
+}
+
+pub trait Float: Num {
     fn sqrt(self) -> Self;
     fn sin(self) -> Self;
     fn cos(self) -> Self;
 }
 
-impl Num for f32 {
-    fn zero() -> Self {
-        0.0
-    }
+macro_rules! impl_num_float {
+    () => {};
+    ($ty:ty, $($rest:tt)*) => {
+        impl_num_float!($ty);
+        impl_num_float!($($rest)*);
+    };
+    ($ty:ty) => {
+        impl Num for $ty {
+            #[inline(always)]
+            fn zero() -> $ty { 0.0 }
 
-    fn one() -> Self {
-        1.0
-    }
-
-    fn sqrt(self) -> Self {
-        self.sqrt()
-    }
-
-    fn sin(self) -> Self {
-        self.sin()
-    }
-
-    fn cos(self) -> Self {
-        self.cos()
-    }
-}
-
-impl Num for f64 {
-    fn zero() -> Self {
-        0.0
-    }
-
-    fn one() -> Self {
-        1.0
-    }
-
-    fn sqrt(self) -> Self {
-        self.sqrt()
-    }
-
-    fn sin(self) -> Self {
-        self.sin()
-    }
-
-    fn cos(self) -> Self {
-        self.cos()
-    }
-}
-
-impl<const N: usize> Num for Simd<f32, N>
-where
-    LaneCount<N>: SupportedLaneCount,
-{
-    fn zero() -> Self {
-        Simd::splat(0.0)
-    }
-
-    fn one() -> Self {
-        Simd::splat(1.0)
-    }
-
-    fn sqrt(self) -> Self {
-        StdFloat::sqrt(self)
-    }
-
-    fn sin(mut self) -> Self {
-        for el in self.as_mut_array() {
-            *el = el.sin();
+            #[inline(always)]
+            fn one() -> $ty { 1.0 }
         }
-        self
-    }
 
-    fn cos(mut self) -> Self {
-        for el in self.as_mut_array() {
-            *el = el.cos();
+        impl Float for $ty {
+            #[inline(always)]
+            fn sqrt(self) -> $ty { self.sqrt() }
+
+            #[inline(always)]
+            fn sin(self)  -> $ty { self.sin()  }
+
+            #[inline(always)]
+            fn cos(self)  -> $ty { self.cos()  }
         }
-        self
-    }
+    };
 }
+
+impl_num_float!(f32, f64);
+
+macro_rules! impl_num_int {
+    () => {};
+    ($ty:ty, $($rest:tt)*) => {
+        impl_num_float!($ty);
+        impl_num_float!($($rest)*);
+    };
+    ($ty:ty) => {
+        impl Num for $ty {
+            #[inline(always)]
+            fn zero() -> $ty { 0 }
+
+            #[inline(always)]
+            fn one() -> $ty { 1 }
+        }
+    };
+}
+
+impl_num_int!(i32);
+
+macro_rules! impl_num_float_simd {
+    () => {};
+    ($ty:ty, $($rest:tt)*) => {
+        impl_num_float_simd!($ty);
+    };
+    ($ty:ty) => {
+
+        impl<const N: usize> Num for Simd<$ty, N>
+        where
+            LaneCount<N>: SupportedLaneCount,
+        {
+            #[inline(always)]
+            fn zero() -> Self { Simd::splat(0.0) }
+
+            #[inline(always)]
+            fn one()  -> Self { Simd::splat(1.0)  }
+        }
+
+        impl<const N: usize> Float for Simd<$ty, N>
+        where
+            LaneCount<N>: SupportedLaneCount,
+        {
+            #[inline(always)]
+            fn sqrt(self) -> Self {
+                StdFloat::sqrt(self)
+            }
+
+            fn sin(mut self) -> Self {
+                for el in self.as_mut_array() {
+                    *el = el.sin();
+                }
+                self
+            }
+
+            fn cos(mut self) -> Self {
+                for el in self.as_mut_array() {
+                    *el = el.cos();
+                }
+                self
+            }
+        }
+    };
+}
+
+impl_num_float_simd!(f32, f64);
