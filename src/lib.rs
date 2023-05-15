@@ -1,4 +1,4 @@
-#![feature(slice_as_chunks, iter_next_chunk, portable_simd)]
+#![feature(slice_as_chunks, iter_next_chunk, portable_simd, int_roundings)]
 
 pub mod buf;
 pub mod obj;
@@ -32,6 +32,9 @@ pub struct Vert {
 
 impl prim3d::Vertex for Vert {
     type Attr = Vec3;
+    type SimdAttr<const LANES: usize> = vec::Vec<std::simd::Simd<f32, LANES>, 3>
+    where
+        std::simd::LaneCount<LANES>: std::simd::SupportedLaneCount;
 
     fn position(&self) -> &Vec3 {
         self.pos.slice::<0, 3>()
@@ -39,6 +42,18 @@ impl prim3d::Vertex for Vert {
 
     fn interpolate(w: Vec3, v0: &Self, v1: &Self, v2: &Self) -> Vec3 {
         w.x * v0.normal + w.y * v1.normal + w.z * v2.normal
+    }
+
+    fn interpolate_simd<const LANES: usize>(
+        w: vec::Vec<std::simd::Simd<f32, LANES>, 3>,
+        v0: &Self,
+        v1: &Self,
+        v2: &Self,
+    ) -> Self::SimdAttr<LANES>
+    where
+        std::simd::LaneCount<LANES>: std::simd::SupportedLaneCount
+    {
+        w.x * v0.normal.splat() + w.y * v1.normal.splat() + w.z * v2.normal.splat()
     }
 }
 

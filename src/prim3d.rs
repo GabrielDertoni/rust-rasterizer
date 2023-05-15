@@ -1,6 +1,9 @@
+use std::simd::{Simd, SupportedLaneCount, LaneCount, Mask};
+
 use crate::buf::{MatrixSliceMut, PixelBuf};
 use crate::vec::{Vec, Vec3, Vec4, Vec2i, Vec3i};
 use crate::{triangles_iter, ScreenPos};
+use crate::Pixel;
 
 fn to_screen_pos(v: Vec4) -> ScreenPos {
     (v.x as i32, v.y as i32, v.z)
@@ -128,9 +131,28 @@ pub fn draw_triangle2(
 
 pub trait Vertex {
     type Attr;
+    type SimdAttr<const LANES: usize>
+    where
+        LaneCount<LANES>: SupportedLaneCount;
 
     fn position(&self) -> &Vec3;
     fn interpolate(w: Vec3, v0: &Self, v1: &Self, v2: &Self) -> Self::Attr;
+
+    fn interpolate_simd<const LANES: usize>(
+        w: Vec<Simd<f32, LANES>, 3>,
+        v0: &Self,
+        v1: &Self,
+        v2: &Self,
+    ) -> Self::SimdAttr<LANES>
+    where
+        LaneCount<LANES>: SupportedLaneCount;
+    // {
+    //     std::array::from_fn::<Self::Attr, LANES, _>(|i| {
+    //         let wi = Vec3::from([w.x.as_array()[i], w.y.as_array()[i], w.z.as_array()[i]]);
+    //         Self::interpolate(wi, v0, v1, v2)
+    //     })
+    //     .into()
+    // }
 }
 
 pub fn draw_triangles<V: Vertex>(
@@ -224,13 +246,28 @@ pub fn orient_2d_i32(from: Vec2i, to: Vec2i, p: Vec2i) -> i32 {
     u.x * v.y - u.y * v.x
 }
 
+const LANES: usize = 4;
+
+type Vec4xX = Vec<Simd<f32, LANES>, 4>;
+type Vec3xX = Vec<Simd<f32, LANES>, 3>;
+type IVec2xX = Vec<Simd<i32, LANES>, 2>;
+
 pub fn draw_triangles_opt<V: Vertex>(
     vert: &[V],
     tris: &[[u32; 3]],
-    mut frag_shader: impl FnMut(V::Attr) -> Vec4,
+    mut frag_shader: impl FnMut(Mask<i32, LANES>, V::SimdAttr<LANES>) -> Vec4xX,
     mut pixels: PixelBuf,
     mut depth_buf: MatrixSliceMut<f32>,
 ) {
+    use crate::vec::{IVec2x4, IVec3x4, Vec3x4, Vec4x4};
+    use std::simd::{Simd, SimdPartialOrd, SimdFloat};
+
+    let stride = pixels.stride;
+    let width = pixels.width as i32;
+    let height = pixels.height as i32;
+    let pixels = pixels.as_slice_mut();
+    let depth_buf = depth_buf.as_slice_mut();
+
     for &[p0, p1, p2] in tris {
         let v0 = &vert[p2 as usize];
         let v1 = &vert[p1 as usize];
@@ -245,7 +282,9 @@ pub fn draw_triangles_opt<V: Vertex>(
         let p2i = p2.xy().to_i32();
 
         let min = p0i.min(p1i).min(p2i).max(Vec2i::repeat(0));
-        let max = p0i.max(p1i).max(p2i).min(Vec2i::from([pixels.width as i32, pixels.height as i32]));
+        // min.x = min.x.next_multiple_of(-(LANES as i32)).max(0);
+        let max = p0i.max(p1i).max(p2i).min(Vec2i::from([width, height]));
+        // max.x = max.x.next_multiple_of(LANES as i32).min(pixels.width as i32);
 
         // 2 times the area of the triangle
         let tri_area = orient_2d_i32(p0i, p1i, p2i) as f32;
@@ -253,8 +292,6 @@ pub fn draw_triangles_opt<V: Vertex>(
         if tri_area <= 0.0 {
             continue;
         }
-
-        let bbox_width = max.x - min.x + 1;
 
         // (b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x)
         // u.x         * (p.y - a.y) - u.y         * (p.x - a.x)
@@ -266,44 +303,93 @@ pub fn draw_triangles_opt<V: Vertex>(
         // u.x * p.y +           D           - u.y * p.x;
         // u.x * p.y - u.y * p.x + D;
 
+        let p = min.splat() + IVec2xX::from([Simd::from([0, 1, 2, 3]), Simd::splat(0)]);
+
+        let lanes = LANES as i32;
+
         let u_12 = p2i - p1i;
         let c_12 = u_12.y * p1i.x - u_12.x * p1i.y;
-        let w0_inc = Vec2i::from([-u_12.y, u_12.x + u_12.y * bbox_width]);
-        let mut w0 = u_12.x * min.y - u_12.y * min.x + c_12;
+        let w0_inc = Vec2i::from([-u_12.y * lanes, p2i.x - p1i.x]).splat();
+        let mut w0_row = Simd::splat(u_12.x) * p.y - Simd::splat(u_12.y) * p.x + Simd::splat(c_12);
 
         let u_20 = p0i - p2i;
         let c_20 = u_20.y * p2i.x - u_20.x * p2i.y;
-        let w1_inc = Vec2i::from([-u_20.y, u_20.x + u_20.y * bbox_width]);
-        let mut w1 = u_20.x * min.y - u_20.y * min.x + c_20;
+        let w1_inc = Vec2i::from([-u_20.y * lanes, p0i.x - p2i.x]).splat();
+        let mut w1_row = Simd::splat(u_20.x) * p.y - Simd::splat(u_20.y) * p.x + Simd::splat(c_20);
 
         let u_01 = p1i - p0i;
         let c_01 = u_01.y * p0i.x - u_01.x * p0i.y;
-        let w2_inc = Vec2i::from([-u_01.y, u_01.x + u_01.y * bbox_width]);
-        let mut w2 = u_01.x * min.y - u_01.y * min.x + c_01;
+        let w2_inc = Vec2i::from([-u_01.y * lanes, p1i.x - p0i.x]).splat();
+        let mut w2_row = Simd::splat(u_01.x) * p.y - Simd::splat(u_01.y) * p.x + Simd::splat(c_01);
 
+        let mut row_start = min.y as usize * stride + min.x as usize;
         for y in min.y..=max.y {
-            for x in min.x..=max.x {
-                let p = Vec2i::from([x, y]);
-
-                let w = Vec3i::from([w0, w1, w2]);
-                if (w.x | w.y | w.z) >= 0 {
-                    let w = w.to_f32() / tri_area;
-                    let interp = V::interpolate(w, v0, v1, v2);
-                    let idx = (x as usize, y as usize);
-                    let z = w.x * p0.z + w.y * p1.z + w.z * p2.z;
-                    if z > depth_buf[idx] {
-                        let color = frag_shader(interp).map(|el| el.clamp(-1.0, 1.0)) * 255.0;
-                        pixels[idx] = color.to_u8().to_array();
-                        depth_buf[idx] = z;
-                    }
+            let mut w0 = w0_row;
+            let mut w1 = w1_row;
+            let mut w2 = w2_row;
+            let mut idx = row_start;
+            for x in (min.x..=max.x).step_by(LANES) {
+                let mask = (w0 | w1 | w2).simd_ge(Simd::splat(0));
+                if mask.any() {
+                    let w = Vec3xX::from([
+                        w0.cast::<f32>(),
+                        w1.cast::<f32>(),
+                        w2.cast::<f32>()
+                    ]) / Simd::splat(tri_area);
+                    let interp = V::interpolate_simd(w, v0, v1, v2);
+                    let z = w.x * Simd::splat(p0.z) + w.y * Simd::splat(p1.z) + w.z * Simd::splat(p2.z);
+                    // let depth = Simd::from([
+                    //     depth_buf[idx+0],
+                    //     depth_buf[idx+1],
+                    //     depth_buf[idx+2],
+                    //     depth_buf[idx+3],
+                    // ]);
+                    let depth = unsafe {
+                        let ptr = &depth_buf[idx] as *const f32;
+                        Simd::from(*ptr.cast::<[f32; LANES]>())
+                    };
+                    let mask = mask & (z.simd_gt(depth));
+                    let mask_i8 = mask.cast::<i8>();
+                    let prev_color = [
+                        pixels[idx+0],
+                        pixels[idx+1],
+                        pixels[idx+2],
+                        pixels[idx+3],
+                    ];
+                    let prev_color = unsafe {
+                        let ptr = &pixels[idx] as *const Pixel;
+                        *ptr.cast::<[Pixel; LANES]>()
+                    };
+                    let prev_color = Vec::<Simd<u8, LANES>, 4>::from([
+                        Simd::from([prev_color[0][0], prev_color[1][0], prev_color[2][0], prev_color[3][0]]),
+                        Simd::from([prev_color[0][1], prev_color[1][1], prev_color[2][1], prev_color[3][1]]),
+                        Simd::from([prev_color[0][2], prev_color[1][2], prev_color[2][2], prev_color[3][2]]),
+                        Simd::from([prev_color[0][3], prev_color[1][3], prev_color[2][3], prev_color[3][3]]),
+                    ]);
+                    let color = frag_shader(mask, interp)
+                        .map(|el| (el.simd_clamp(Simd::splat(-1.0), Simd::splat(1.0)) * Simd::splat(255.0)).cast::<u8>())
+                        .zip_with(prev_color, |el, prev| mask_i8.select(el, prev));
+                    pixels[idx+0] = color.map(|el| el.as_array()[0]).to_array();
+                    pixels[idx+1] = color.map(|el| el.as_array()[1]).to_array();
+                    pixels[idx+2] = color.map(|el| el.as_array()[2]).to_array();
+                    pixels[idx+3] = color.map(|el| el.as_array()[3]).to_array();
+                    let new_depth = mask.select(z, depth);
+                    depth_buf[idx+0] = new_depth.as_array()[0];
+                    depth_buf[idx+1] = new_depth.as_array()[1];
+                    depth_buf[idx+2] = new_depth.as_array()[2];
+                    depth_buf[idx+3] = new_depth.as_array()[3];
                 }
                 w0 += w0_inc.x;
                 w1 += w1_inc.x;
                 w2 += w2_inc.x;
+
+                idx += LANES;
             }
-            w0 += w0_inc.y;
-            w1 += w1_inc.y;
-            w2 += w2_inc.y;
+            w0_row += w0_inc.y;
+            w1_row += w1_inc.y;
+            w2_row += w2_inc.y;
+
+            row_start += stride;
         }
     }
 }

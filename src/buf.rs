@@ -54,6 +54,16 @@ impl<'a, E> MatrixSliceMut<'a, E> {
         }
     }
 
+    pub unsafe fn from_ptr(ptr: *mut E, width: usize, height: usize) -> Self {
+        MatrixSliceMut {
+            width,
+            height,
+            stride: width,
+            ptr,
+            _marker: PhantomData,
+        }
+    }
+
     pub fn as_slice(&self) -> &[E] {
         unsafe { std::slice::from_raw_parts(self.ptr, self.width * self.height) }
     }

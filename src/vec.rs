@@ -2,7 +2,7 @@ use std::ops::{
     Add, AddAssign, Div, DivAssign, Index, IndexMut, Mul, MulAssign, Neg, Sub,
     SubAssign,
 };
-use std::simd::{LaneCount, Simd, SimdElement, StdFloat, SimdFloat, SupportedLaneCount};
+use std::simd::{LaneCount, Simd, SimdElement, StdFloat, SimdFloat, SimdOrd, SupportedLaneCount};
 
 pub type Mat4x4 = Mat<f32, 4, 4>;
 
@@ -24,7 +24,7 @@ impl<T: Copy, const M: usize, const N: usize> Mat<T, M, N> {
         rhs: Mat<U, M, N>,
         mut f: impl FnMut(T, U) -> R,
     ) -> Mat<R, M, N> {
-        use std::mem::{MaybeUninit, transmute, transmute_copy};
+        use std::mem::{MaybeUninit, transmute_copy};
 
         // SAFETY: Transposing the `MaybeUninit` to the inner type is safe, since we still can't access
         // any real data that might be uninitialized.
@@ -37,6 +37,14 @@ impl<T: Copy, const M: usize, const N: usize> Mat<T, M, N> {
 
         // SAFETY: Equivalent to `assume_init`, we have initialized every element.
         unsafe { Mat(transmute_copy(&arr)) }
+    }
+
+    pub fn splat<const LANES: usize>(self) -> Mat<Simd<T, LANES>, M, N>
+    where
+        T: SimdElement,
+        LaneCount<LANES>: SupportedLaneCount,
+    {
+        self.map(|el| Simd::splat(el))
     }
 }
 
@@ -145,6 +153,14 @@ pub type Vec4 = Vec<f32, 4>;
 pub type Vec2i = Vec<i32, 2>;
 pub type Vec3i = Vec<i32, 3>;
 pub type Vec4i = Vec<i32, 4>;
+
+pub type Vec2x4 = Vec<Simd<f32, 4>, 2>;
+pub type Vec3x4 = Vec<Simd<f32, 4>, 3>;
+pub type Vec4x4 = Vec<Simd<f32, 4>, 4>;
+
+pub type IVec2x4 = Vec<Simd<i32, 4>, 2>;
+pub type IVec3x4 = Vec<Simd<i32, 4>, 3>;
+pub type IVec4x4 = Vec<Simd<i32, 4>, 4>;
 
 impl<T, const N: usize> Vec<T, N> {
     pub fn to_array(&self) -> [T; N] {
@@ -349,6 +365,24 @@ macro_rules! impl_mul_lhs {
                 ret
             }
         })+
+        $(
+            impl<const LANES: usize, const M: usize, const N: usize> Mul<Mat<Simd<$ty, LANES>, M, N>> for Simd<$ty, LANES>
+            where
+                LaneCount<LANES>: SupportedLaneCount,
+            {
+                type Output = Mat<Simd<$ty, LANES>, M, N>;
+
+                fn mul(self, rhs: Mat<Simd<$ty, LANES>, M, N>) -> Mat<Simd<$ty, LANES>, M, N> {
+                    let mut ret = rhs;
+                    for i in 0..M {
+                        for j in 0..N {
+                            ret[(i, j)] *= self;
+                        }
+                    }
+                    ret
+                }
+            }
+        )+
     };
 }
 
@@ -693,6 +727,36 @@ macro_rules! impl_num_int {
 }
 
 impl_num_int!(i32);
+
+macro_rules! impl_num_simd_int {
+    () => {};
+    ($ty:ty, $($rest:tt)*) => {
+        impl_num_float_simd!($ty);
+    };
+    ($ty:ty) => {
+        impl<const N: usize> Num for Simd<$ty, N>
+        where
+            LaneCount<N>: SupportedLaneCount,
+        {
+            #[inline(always)]
+            fn zero() -> Self { Simd::splat(0) }
+
+            #[inline(always)]
+            fn one()  -> Self { Simd::splat(1)  }
+
+            #[inline(always)]
+            fn min(self, rhs: Self)  -> Self { self.simd_min(rhs)  }
+
+            #[inline(always)]
+            fn max(self, rhs: Self)  -> Self { self.simd_max(rhs)  }
+
+            #[inline(always)]
+            fn clamp(self, min: Self, max: Self)  -> Self { self.simd_clamp(min, max)  }
+        }
+    };
+}
+
+impl_num_simd_int!(i32);
 
 macro_rules! impl_num_float_simd {
     () => {};

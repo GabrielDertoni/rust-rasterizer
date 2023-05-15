@@ -1,14 +1,15 @@
-#![feature(slice_flatten)]
+#![feature(portable_simd, slice_flatten)]
+
+use std::simd::{Simd, Mask};
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 
 use rasterization::{
-    Vert,
     compute_normals,
     buf::{MatrixSliceMut, PixelBuf},
     obj,
-    vec::{Vec3, Vec4},
-    prim3d::{self, draw_triangles, draw_triangles_opt},
+    vec::{self, Vec3, Vec4, Vec4x4},
+    prim3d::{draw_triangles, draw_triangles_opt},
 };
 
 
@@ -46,7 +47,7 @@ fn triangle_rasterization(c: &mut Criterion) {
             for d in depth.as_slice_mut() {
                 *d = f32::MIN;
             }
-            draw_triangles_opt(&vert, &tris, frag_shader, pixels.borrow(), depth.borrow());
+            draw_triangles_opt(&vert, &tris, frag_shader_simd, pixels.borrow(), depth.borrow());
             black_box(pixels.borrow());
             black_box(depth.borrow());
         })
@@ -64,6 +65,13 @@ fn triangle_rasterization(c: &mut Criterion) {
 #[inline(always)]
 fn frag_shader(normal: Vec3) -> Vec4 {
     Vec4::from([normal.x, normal.y, normal.z, 1.0])
+}
+
+const LANES: usize = 4;
+
+#[inline(always)]
+fn frag_shader_simd(mask: Mask<i32, LANES>, n: vec::Vec<Simd<f32, LANES>, 3>) -> vec::Vec<Simd<f32, LANES>, 4> {
+    vec::Vec::from([n.x, n.y, n.z, Simd::splat(1.0)])
 }
 
 criterion_group!(benches, triangle_rasterization);

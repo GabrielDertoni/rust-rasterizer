@@ -1,6 +1,8 @@
 #![feature(slice_as_chunks, iter_next_chunk, portable_simd)]
 
 use std::time::{Duration, Instant};
+use std::simd::Simd;
+
 
 use pixels::{Pixels, SurfaceTexture};
 use winit::{
@@ -17,15 +19,13 @@ use rasterization::{
     obj,
     buf,
     prim3d,
-    vec::{Vec3, Vec4, Mat4x4},
+    vec::{self, Vec3, Vec4, Mat4x4},
 };
 
 const WIDTH: u32 = 720;
 const HEIGHT: u32 = 720;
 
 fn main() {
-    debug();
-    return;
     let event_loop = EventLoop::new();
     let window = WindowBuilder::new()
         .with_title("rasterizer")
@@ -132,6 +132,7 @@ impl World {
             [camera_z.x, camera_z.y, camera_z.z, -eye.z],
             [0.0, 0.0, 0.0, 1.0],
         ]);
+        let view = Mat4x4::identity();
 
         let vert: Vec<_> = self
             .vert
@@ -145,7 +146,7 @@ impl World {
         prim3d::draw_triangles_opt(
             &vert,
             &self.tris,
-            |n| Vec4::from([n.x, n.y, n.z, 1.0]),
+            |_mask, n| vec::Vec::from([n.x, n.y, n.z, Simd::splat(1.0)]),
             pixels.borrow(),
             depth_buf.borrow(),
         );
@@ -160,6 +161,9 @@ impl World {
 fn debug() {
     use image::{ImageBuffer, ImageFormat, Rgba, Luma};
 
+    use rasterization::vec::Vec4x4;
+
+    println!("Allocating buffers");
     let mut im_buf = ImageBuffer::<Rgba<u8>, _>::new(WIDTH, HEIGHT);
     let (pixels, _)= im_buf.as_chunks_mut::<4>();
     let mut pixels = buf::PixelBuf::new(pixels, WIDTH as usize, HEIGHT as usize);
@@ -174,6 +178,7 @@ fn debug() {
 
     clear_color(pixels.borrow(), 0x00_00_00_ff);
 
+    println!("Reading .obj");
     let obj = obj::load_obj("teapot.obj".as_ref()).unwrap();
     let mut vert = compute_normals(&obj.vert, &obj.tris);
 
@@ -183,16 +188,18 @@ fn debug() {
 
     let start = std::time::Instant::now();
 
+    println!("Rasterizing");
     prim3d::draw_triangles_opt(
         &vert,
         &obj.tris,
-        |n| Vec4::from([n.x, n.y, n.z, 1.0]),
+        |_mask, n| rasterization::vec::Vec::from([n.x, n.y, n.z, Simd::splat(1.0)]),
         pixels.borrow(),
         depth_buf.borrow(),
     );
 
     println!("rendered in {:?}", start.elapsed());
 
+    println!("Writing image");
     let mut f = std::fs::File::create("frag.png").unwrap();
     im_buf.write_to(&mut f, ImageFormat::Png).unwrap();
 
