@@ -254,23 +254,39 @@ pub fn draw_triangles_opt<V: Vertex>(
             continue;
         }
 
-        let u_01 = p1i - p0i;
+        let bbox_width = max.x - min.x + 1;
+
+        // (b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x)
+        // u.x         * (p.y - a.y) - u.y         * (p.x - a.x)
+        // u.x * p.y - u.x * a.y - (u.y * p.x - u.y * a.x);
+        // u.x * p.y - u.x * a.y + u.y * a.x - u.y * p.x;
+        // u.x * p.y - B         + C         - u.y * p.x;
+        // u.x * p.y + (-B)      + C         - u.y * p.x;
+        // u.x * p.y +        (C - B)        - u.y * p.x;
+        // u.x * p.y +           D           - u.y * p.x;
+        // u.x * p.y - u.y * p.x + D;
+
         let u_12 = p2i - p1i;
+        let c_12 = u_12.y * p1i.x - u_12.x * p1i.y;
+        let w0_inc = Vec2i::from([-u_12.y, u_12.x + u_12.y * bbox_width]);
+        let mut w0 = u_12.x * min.y - u_12.y * min.x + c_12;
+
         let u_20 = p0i - p2i;
+        let c_20 = u_20.y * p2i.x - u_20.x * p2i.y;
+        let w1_inc = Vec2i::from([-u_20.y, u_20.x + u_20.y * bbox_width]);
+        let mut w1 = u_20.x * min.y - u_20.y * min.x + c_20;
+
+        let u_01 = p1i - p0i;
+        let c_01 = u_01.y * p0i.x - u_01.x * p0i.y;
+        let w2_inc = Vec2i::from([-u_01.y, u_01.x + u_01.y * bbox_width]);
+        let mut w2 = u_01.x * min.y - u_01.y * min.x + c_01;
 
         for y in min.y..=max.y {
             for x in min.x..=max.x {
                 let p = Vec2i::from([x, y]);
 
-                let v_01 = p - p0i;
-                let v_12 = p - p1i;
-                let v_20 = p - p2i;
-                let w = Vec3i::from([
-                    u_12.x * v_12.y - u_12.y * v_12.x,
-                    u_20.x * v_20.y - u_20.y * v_20.x,
-                    u_01.x * v_01.y - u_01.y * v_01.x,
-                ]);
-                if w.x >= 0 && w.y >= 0 && w.z >= 0 {
+                let w = Vec3i::from([w0, w1, w2]);
+                if (w.x | w.y | w.z) >= 0 {
                     let w = w.to_f32() / tri_area;
                     let interp = V::interpolate(w, v0, v1, v2);
                     let idx = (x as usize, y as usize);
@@ -281,7 +297,13 @@ pub fn draw_triangles_opt<V: Vertex>(
                         depth_buf[idx] = z;
                     }
                 }
+                w0 += w0_inc.x;
+                w1 += w1_inc.x;
+                w2 += w2_inc.x;
             }
+            w0 += w0_inc.y;
+            w1 += w1_inc.y;
+            w2 += w2_inc.y;
         }
     }
 }
