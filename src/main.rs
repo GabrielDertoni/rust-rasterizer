@@ -11,13 +11,13 @@ use winit::{
 };
 
 use rasterization::{
-    triangles_iter,
     clear_color,
+    compute_normals,
+    Vert,
     obj,
     buf,
     prim3d,
-    vec::{Mat, Vec3, Vec4, Mat4x4, Vec2i},
-    swizzle,
+    vec::{Vec3, Vec4, Mat4x4},
 };
 
 const WIDTH: u32 = 720;
@@ -78,7 +78,7 @@ fn main() {
 }
 
 struct World {
-    vert: Vec<Vec4>,
+    vert: Vec<Vert>,
     tris: Vec<[u32; 3]>,
     depth_buf: Vec<f32>,
     theta: f32,
@@ -88,6 +88,7 @@ struct World {
 impl World {
     fn new() -> Self {
         let obj::Obj { vert, tris } = obj::load_obj("teapot.obj".as_ref()).unwrap();
+        let vert = compute_normals(&vert, &tris);
         World {
             tris,
             vert,
@@ -135,22 +136,19 @@ impl World {
         let vert: Vec<_> = self
             .vert
             .iter()
-            .copied()
-            .map(|v| view * model * v)
+            .map(|v| Vert {
+                pos: pixels.ndc_to_screen(view * model * v.pos),
+                normal: v.normal,
+            })
             .collect();
 
-        for [p0, p1, p2] in triangles_iter(&vert, &self.tris) {
-            let color = (p0 - p1).xyz().cross((p2 - p1).xyz()).normalized();
-
-            prim3d::draw_triangle(
-                pixels.ndc_to_screen(p0),
-                pixels.ndc_to_screen(p1),
-                pixels.ndc_to_screen(p2),
-                |_| Vec4::from([color.x, color.y, color.z, 1.0]),
-                pixels.borrow(),
-                depth_buf.borrow(),
-            )
-        }
+        prim3d::draw_triangles_opt(
+            &vert,
+            &self.tris,
+            |n| Vec4::from([n.x, n.y, n.z, 1.0]),
+            pixels.borrow(),
+            depth_buf.borrow(),
+        );
         println!("render time: {:?}", start.elapsed());
     }
 
@@ -160,7 +158,7 @@ impl World {
 }
 
 fn debug() {
-    use image::{ImageBuffer, ImageFormat, Rgba};
+    use image::{ImageBuffer, ImageFormat, Rgba, Luma};
 
     let mut im_buf = ImageBuffer::<Rgba<u8>, _>::new(WIDTH, HEIGHT);
     let (pixels, _)= im_buf.as_chunks_mut::<4>();
@@ -177,20 +175,35 @@ fn debug() {
     clear_color(pixels.borrow(), 0x00_00_00_ff);
 
     let obj = obj::load_obj("teapot.obj".as_ref()).unwrap();
+    let mut vert = compute_normals(&obj.vert, &obj.tris);
 
-    for [p0, p1, p2] in triangles_iter(&obj.vert, &obj.tris) {
-        let color = (p0 - p1).xyz().cross((p2 - p1).xyz()).normalized();
-
-        prim3d::draw_triangle(
-            pixels.ndc_to_screen(p0),
-            pixels.ndc_to_screen(p1),
-            pixels.ndc_to_screen(p2),
-            |_| swizzle!(color, [x, y, z, 1.0]),
-            pixels.borrow(),
-            depth_buf.borrow(),
-        )
+    for v in &mut vert {
+        v.pos = pixels.ndc_to_screen(v.pos);
     }
 
-    let mut f = std::fs::File::create("out.png").unwrap();
+    let start = std::time::Instant::now();
+
+    prim3d::draw_triangles_opt(
+        &vert,
+        &obj.tris,
+        |n| Vec4::from([n.x, n.y, n.z, 1.0]),
+        pixels.borrow(),
+        depth_buf.borrow(),
+    );
+
+    println!("rendered in {:?}", start.elapsed());
+
+    let mut f = std::fs::File::create("frag.png").unwrap();
     im_buf.write_to(&mut f, ImageFormat::Png).unwrap();
+
+    let mut f = std::fs::File::create("depth.png").unwrap();
+    let depth_img = depth_buf.as_slice()
+        .iter()
+        .copied()
+        .map(|v| (255.0 * (v.clamp(-1.0, 1.0) + 1.0) / 2.0) as u8)
+        .collect::<Vec<_>>();
+    ImageBuffer::<Luma<u8>, _>::from_raw(WIDTH, HEIGHT, depth_img.as_slice())
+        .unwrap()
+        .write_to(&mut f, ImageFormat::Png)
+        .unwrap();
 }

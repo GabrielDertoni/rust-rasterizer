@@ -1,8 +1,8 @@
 use std::ops::{
-    Add, AddAssign, Deref, DerefMut, Div, DivAssign, Index, IndexMut, Mul, MulAssign, Neg, Sub,
+    Add, AddAssign, Div, DivAssign, Index, IndexMut, Mul, MulAssign, Neg, Sub,
     SubAssign,
 };
-use std::simd::{LaneCount, Simd, SimdElement, StdFloat, SupportedLaneCount};
+use std::simd::{LaneCount, Simd, SimdElement, StdFloat, SimdFloat, SupportedLaneCount};
 
 pub type Mat4x4 = Mat<f32, 4, 4>;
 
@@ -47,6 +47,12 @@ impl<const M: usize, const N: usize> Mat<f32, M, N> {
 
     pub fn to_u8(self) -> Mat<u8, M, N> {
         self.map(|el| el as u8)
+    }
+}
+
+impl<const M: usize, const N: usize> Mat<i32, M, N> {
+    pub fn to_f32(self) -> Mat<f32, M, N> {
+        self.map(|el| el as f32)
     }
 }
 
@@ -144,11 +150,39 @@ impl<T, const N: usize> Vec<T, N> {
     pub fn to_array(&self) -> [T; N] {
         unsafe { std::mem::transmute_copy(&self.0) }
     }
+
+    pub fn slice<const START: usize, const COUNT: usize>(&self) -> &Vec<T, COUNT> {
+        if START + COUNT > N { panic!("index out of bounds"); }
+        let ptr = self.0.as_ptr();
+        unsafe { std::mem::transmute(&*ptr.add(START)) }
+    }
+
+    pub fn slice_mut<const START: usize, const COUNT: usize>(&mut self) -> &mut Vec<T, COUNT> {
+        if START + COUNT > N { panic!("index out of bounds"); }
+        let ptr = self.0.as_mut_ptr();
+        unsafe { std::mem::transmute(&mut *ptr.add(START)) }
+    }
+
+    pub fn inplace(arr: &[T; N]) -> &Self {
+        unsafe { std::mem::transmute(arr) }
+    }
+
+    pub fn inplace_mut(arr: &mut [T; N]) -> &mut Self {
+        unsafe { std::mem::transmute(arr) }
+    }
 }
 
 impl<T: Num, const N: usize> Vec<T, N> {
     pub fn mag_sq(&self) -> T {
         self.0.iter().map(|&[coord]| coord * coord).sum()
+    }
+
+    pub fn dot(&self, rhs: Self) -> T {
+        let mut ret = T::zero();
+        for i in 0..N {
+            ret += self.0[i][0] * rhs.0[i][0];
+        }
+        ret
     }
 }
 
@@ -159,6 +193,10 @@ impl<T: Float, const N: usize> Vec<T, N> {
 
     pub fn normalized(self) -> Self {
         self / self.mag()
+    }
+
+    pub fn normalize(&mut self) {
+        *self /= self.mag()
     }
 }
 
@@ -193,6 +231,15 @@ impl<T: Num> Vec<T, 3> {
 impl<T: Float> Vec<T, 3> {
     pub fn to_rotation(self) -> Mat<T, 4, 4> {
         Mat::rotation_x(self.x) * Mat::rotation_y(self.y) * Mat::rotation_z(self.z)
+    }
+
+    // source: https://docs.rs/ultraviolet/latest/src/ultraviolet/interp.rs.html#215-219
+    pub fn slerp(self, target: Self, t: T) -> Self {
+        let dot = self.dot(target).clamp(-T::one(), T::one());
+        let theta = dot.acos() * t;
+
+        let v = (target - self * dot).normalized();
+        self * theta.cos() + v * theta.sin()
     }
 }
 
@@ -238,28 +285,38 @@ impl<T, const M: usize, const N: usize> IndexMut<(usize, usize)> for Mat<T, M, N
 impl<T: Num, const M: usize, const N: usize> Add for Mat<T, M, N> {
     type Output = Self;
 
-    fn add(self, rhs: Self) -> Self {
-        let mut ret = self;
+    fn add(mut self, rhs: Self) -> Self {
+        self += rhs;
+        self
+    }
+}
+
+impl<T: Num, const M: usize, const N: usize> AddAssign for Mat<T, M, N> {
+    fn add_assign(&mut self, rhs: Self) {
         for i in 0..M {
             for j in 0..N {
-                ret[(i, j)] += rhs[(i, j)];
+                self[(i, j)] += rhs[(i, j)];
             }
         }
-        ret
     }
 }
 
 impl<T: Num, const M: usize, const N: usize> Sub for Mat<T, M, N> {
     type Output = Self;
 
-    fn sub(self, rhs: Self) -> Self {
-        let mut ret = self;
+    fn sub(mut self, rhs: Self) -> Self {
+        self -= rhs;
+        self
+    }
+}
+
+impl<T: Num, const M: usize, const N: usize> SubAssign for Mat<T, M, N> {
+    fn sub_assign(&mut self, rhs: Self) {
         for i in 0..M {
             for j in 0..N {
-                ret[(i, j)] -= rhs[(i, j)];
+                self[(i, j)] -= rhs[(i, j)];
             }
         }
-        ret
     }
 }
 
@@ -316,14 +373,19 @@ impl<T: Num, const M: usize, const K: usize, const N: usize> Mul<Mat<T, K, N>> f
 impl<T: Num, const M: usize, const N: usize> Div<T> for Mat<T, M, N> {
     type Output = Self;
 
-    fn div(self, rhs: T) -> Self {
-        let mut ret = self;
+    fn div(mut self, rhs: T) -> Self {
+        self /= rhs;
+        self
+    }
+}
+
+impl<T: Num, const M: usize, const N: usize> DivAssign<T> for Mat<T, M, N> {
+    fn div_assign(&mut self, rhs: T) {
         for i in 0..M {
             for j in 0..N {
-                ret[(i, j)] /= rhs;
+                self[(i, j)] /= rhs;
             }
         }
-        ret
     }
 }
 
@@ -415,7 +477,7 @@ mod swizzling {
         pub x: T,
     }
 
-    impl<T: Copy> XY<T> {
+    impl<T: Copy> X<T> {
         #[inline(always)]
         pub fn x(&self) -> Vec<T, 1> {
             Vec::from([self.x])
@@ -547,12 +609,19 @@ pub trait Num:
 {
     fn zero() -> Self;
     fn one() -> Self;
+    fn min(self, rhs: Self) -> Self;
+    fn max(self, rhs: Self) -> Self;
+
+    fn clamp(self, min: Self, max: Self) -> Self {
+        self.max(min).min(max)
+    }
 }
 
 pub trait Float: Num {
     fn sqrt(self) -> Self;
     fn sin(self) -> Self;
     fn cos(self) -> Self;
+    fn acos(self) -> Self;
 }
 
 macro_rules! impl_num_float {
@@ -568,6 +637,15 @@ macro_rules! impl_num_float {
 
             #[inline(always)]
             fn one() -> $ty { 1.0 }
+
+            #[inline(always)]
+            fn min(self, rhs: Self) -> $ty { self.min(rhs) }
+
+            #[inline(always)]
+            fn max(self, rhs: Self) -> $ty { self.max(rhs) }
+
+            #[inline(always)]
+            fn clamp(self, min: Self, max: Self) -> $ty { self.clamp(min, max) }
         }
 
         impl Float for $ty {
@@ -579,6 +657,9 @@ macro_rules! impl_num_float {
 
             #[inline(always)]
             fn cos(self)  -> $ty { self.cos()  }
+
+            #[inline(always)]
+            fn acos(self) -> $ty { self.acos() }
         }
     };
 }
@@ -598,6 +679,15 @@ macro_rules! impl_num_int {
 
             #[inline(always)]
             fn one() -> $ty { 1 }
+
+            #[inline(always)]
+            fn min(self, rhs: Self) -> $ty { Ord::min(self, rhs) }
+
+            #[inline(always)]
+            fn max(self, rhs: Self) -> $ty { Ord::max(self, rhs) }
+
+            #[inline(always)]
+            fn clamp(self, min: Self, max: Self) -> $ty { Ord::clamp(self, min, max) }
         }
     };
 }
@@ -620,6 +710,15 @@ macro_rules! impl_num_float_simd {
 
             #[inline(always)]
             fn one()  -> Self { Simd::splat(1.0)  }
+
+            #[inline(always)]
+            fn min(self, rhs: Self)  -> Self { self.simd_min(rhs)  }
+
+            #[inline(always)]
+            fn max(self, rhs: Self)  -> Self { self.simd_max(rhs)  }
+
+            #[inline(always)]
+            fn clamp(self, min: Self, max: Self)  -> Self { self.simd_clamp(min, max)  }
         }
 
         impl<const N: usize> Float for Simd<$ty, N>
@@ -641,6 +740,13 @@ macro_rules! impl_num_float_simd {
             fn cos(mut self) -> Self {
                 for el in self.as_mut_array() {
                     *el = el.cos();
+                }
+                self
+            }
+
+            fn acos(mut self) -> Self {
+                for el in self.as_mut_array() {
+                    *el = el.acos();
                 }
                 self
             }

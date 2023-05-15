@@ -1,5 +1,5 @@
 use crate::buf::{MatrixSliceMut, PixelBuf};
-use crate::vec::{Vec3, Vec4, Vec2i, Vec3i};
+use crate::vec::{Vec, Vec3, Vec4, Vec2i, Vec3i};
 use crate::{triangles_iter, ScreenPos};
 
 fn to_screen_pos(v: Vec4) -> ScreenPos {
@@ -126,18 +126,25 @@ pub fn draw_triangle2(
 }
 */
 
-pub fn draw_triangles(
-    vert: &[Vec4],
+pub trait Vertex {
+    type Attr;
+
+    fn position(&self) -> &Vec3;
+    fn interpolate(w: Vec3, v0: &Self, v1: &Self, v2: &Self) -> Self::Attr;
+}
+
+pub fn draw_triangles<V: Vertex>(
+    vert: &[V],
     tris: &[[u32; 3]],
-    mut frag_shader: impl FnMut(Vec4) -> Vec4,
+    mut frag_shader: impl FnMut(V::Attr) -> Vec4,
     mut pixels: PixelBuf,
     mut depth_buf: MatrixSliceMut<f32>,
 ) {
     for [p0, p1, p2] in triangles_iter(vert, tris) {
         draw_triangle(
-            pixels.ndc_to_screen(p0),
-            pixels.ndc_to_screen(p1),
-            pixels.ndc_to_screen(p2),
+            p0,
+            p1,
+            p2,
             &mut frag_shader,
             pixels.borrow(),
             depth_buf.borrow(),
@@ -145,17 +152,21 @@ pub fn draw_triangles(
     }
 }
 
-pub fn draw_triangle(
-    p0: Vec4,
-    p1: Vec4,
-    p2: Vec4,
-    mut frag_shader: impl FnMut(Vec4) -> Vec4,
+pub fn draw_triangle<V: Vertex>(
+    v0: &V,
+    v1: &V,
+    v2: &V,
+    mut frag_shader: impl FnMut(V::Attr) -> Vec4,
     mut pixels: PixelBuf,
     mut depth_buf: MatrixSliceMut<f32>,
 ) {
-    let p0i = Vec2i::from([p0.x as i32, p0.y as i32]);
-    let p1i = Vec2i::from([p1.x as i32, p1.y as i32]);
-    let p2i = Vec2i::from([p2.x as i32, p2.y as i32]);
+    let p0 = v0.position();
+    let p1 = v1.position();
+    let p2 = v2.position();
+
+    let p0i = p0.xy().to_i32();
+    let p1i = p1.xy().to_i32();
+    let p2i = p2.xy().to_i32();
 
     let min = p0i.min(p1i).min(p2i).max(Vec2i::repeat(0));
     let max = p0i.max(p1i).max(p2i).min(Vec2i::from([pixels.width as i32, pixels.height as i32]));
@@ -163,27 +174,34 @@ pub fn draw_triangle(
     // 2 times the area of the triangle
     let tri_area = orient_2d_i32(p0i, p1i, p2i) as f32;
 
+    if tri_area <= 0.0 {
+        return;
+    }
+
     for y in min.y..=max.y {
         for x in min.x..=max.x {
             let p = Vec2i::from([x, y]);
             let w = Vec3i::from([
-                orient_2d_i32(p0i, p1i, p),
                 orient_2d_i32(p1i, p2i, p),
                 orient_2d_i32(p2i, p0i, p),
+                orient_2d_i32(p0i, p1i, p),
             ]);
             if w.x >= 0 && w.y >= 0 && w.z >= 0 {
-                let interp = (w.x as f32 * p2 + w.y as f32 * p0 + w.z as f32 * p1) / tri_area;
+                let w = w.to_f32() / tri_area;
+                let interp = V::interpolate(w, v0, v1, v2);
                 let idx = (x as usize, y as usize);
-                if interp.z > depth_buf[idx] {
+                let z = w.x * p0.z + w.y * p1.z + w.z * p2.z;
+                if z > depth_buf[idx] {
                     let color = frag_shader(interp).map(|el| el.clamp(-1.0, 1.0)) * 255.0;
                     let color = color.to_u8();
                     pixels[idx] = [color.x, color.y, color.z, color.w];
-                    depth_buf[idx] = interp.z;
+                    depth_buf[idx] = z;
                 }
             }
         }
     }
 }
+
 
 /// Returns the oriented area of the paralelogram formed by the points `from`, `to`, `p`, `from + (p - to)`. The sign
 /// is positive if the points in the paralelogram wind counterclockwise (according to the order given prior) and
@@ -206,26 +224,69 @@ pub fn orient_2d_i32(from: Vec2i, to: Vec2i, p: Vec2i) -> i32 {
     u.x * v.y - u.y * v.x
 }
 
-/*
-pub fn draw_triangles_opt(
-    vert: &[Vec4],
+pub fn draw_triangles_opt<V: Vertex>(
+    vert: &[V],
     tris: &[[u32; 3]],
-    color: u32,
+    mut frag_shader: impl FnMut(V::Attr) -> Vec4,
     mut pixels: PixelBuf,
     mut depth_buf: MatrixSliceMut<f32>,
 ) {
-    for [p0, p1, p2] in triangles_iter(vert, tris) {
-        draw_triangle(
-            pixels.ndc_to_screen(p0),
-            pixels.ndc_to_screen(p1),
-            pixels.ndc_to_screen(p2),
-            color,
-            pixels.borrow(),
-            depth_buf.borrow(),
-        )
+    for &[p0, p1, p2] in tris {
+        let v0 = &vert[p2 as usize];
+        let v1 = &vert[p1 as usize];
+        let v2 = &vert[p0 as usize];
+
+        let p0 = v0.position();
+        let p1 = v1.position();
+        let p2 = v2.position();
+
+        let p0i = p0.xy().to_i32();
+        let p1i = p1.xy().to_i32();
+        let p2i = p2.xy().to_i32();
+
+        let min = p0i.min(p1i).min(p2i).max(Vec2i::repeat(0));
+        let max = p0i.max(p1i).max(p2i).min(Vec2i::from([pixels.width as i32, pixels.height as i32]));
+
+        // 2 times the area of the triangle
+        let tri_area = orient_2d_i32(p0i, p1i, p2i) as f32;
+
+        if tri_area <= 0.0 {
+            continue;
+        }
+
+        let u_01 = p1i - p0i;
+        let u_12 = p2i - p1i;
+        let u_20 = p0i - p2i;
+
+        for y in min.y..=max.y {
+            for x in min.x..=max.x {
+                let p = Vec2i::from([x, y]);
+
+                let v_01 = p - p0i;
+                let v_12 = p - p1i;
+                let v_20 = p - p2i;
+                let w = Vec3i::from([
+                    u_12.x * v_12.y - u_12.y * v_12.x,
+                    u_20.x * v_20.y - u_20.y * v_20.x,
+                    u_01.x * v_01.y - u_01.y * v_01.x,
+                ]);
+                if w.x >= 0 && w.y >= 0 && w.z >= 0 {
+                    let w = w.to_f32() / tri_area;
+                    let interp = V::interpolate(w, v0, v1, v2);
+                    let idx = (x as usize, y as usize);
+                    let z = w.x * p0.z + w.y * p1.z + w.z * p2.z;
+                    if z > depth_buf[idx] {
+                        let color = frag_shader(interp).map(|el| el.clamp(-1.0, 1.0)) * 255.0;
+                        pixels[idx] = color.to_u8().to_array();
+                        depth_buf[idx] = z;
+                    }
+                }
+            }
+        }
     }
 }
 
+/*
 pub fn draw_triangle_simd<const LANES: usize>(
     mut p0: ScreenPos,
     mut p1: ScreenPos,
