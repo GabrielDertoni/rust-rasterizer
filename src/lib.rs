@@ -1,4 +1,4 @@
-#![feature(slice_as_chunks, iter_next_chunk, portable_simd, int_roundings)]
+#![feature(slice_as_chunks, iter_next_chunk, portable_simd, int_roundings, split_array)]
 
 pub mod buf;
 pub mod obj;

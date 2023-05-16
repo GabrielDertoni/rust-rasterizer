@@ -280,6 +280,28 @@ pub fn draw_triangles_opt<V: Vertex>(
     use crate::vec::{IVec2x4, IVec3x4, Vec3x4, Vec4x4};
     use std::simd::{Simd, SimdPartialOrd, SimdFloat};
 
+    const STEP_X: i32 = 4;
+    const STEP_Y: i32 = 1;
+
+    // (b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x)
+    // u.x         * (p.y - a.y) - u.y         * (p.x - a.x)
+    // u.x * p.y - u.x * a.y - (u.y * p.x - u.y * a.x);
+    // u.x * p.y - u.x * a.y + u.y * a.x - u.y * p.x;
+    // u.x * p.y - B         + C         - u.y * p.x;
+    // u.x * p.y + (-B)      + C         - u.y * p.x;
+    // u.x * p.y +        (C - B)        - u.y * p.x;
+    // u.x * p.y +           D           - u.y * p.x;
+    // u.x * p.y - u.y * p.x + D;
+    #[inline(always)]
+    fn orient_2d_step(from: Vec2i, to: Vec2i, p: Vec2i) -> (Vec<Simd<i32, LANES>, 2>, Simd<i32, LANES>) {
+        let u = to - from;
+        let c = u.y * from.x - u.x * from.y;
+        let p = p.splat() + IVec2xX::from([Simd::from([0, 1, 2, 3]), Simd::from([0, 0, 0, 0])]);
+        let w = Simd::splat(u.x) * p.y - Simd::splat(u.y) * p.x + Simd::splat(c);
+        let inc = Vec2i::from([-u.y * STEP_X, u.x * STEP_Y]).splat();
+        (inc, w)
+    }
+
     let stride = pixels.stride;
     let width = pixels.width as i32;
     let height = pixels.height as i32;
@@ -287,9 +309,6 @@ pub fn draw_triangles_opt<V: Vertex>(
     let depth_buf = depth_buf.as_slice_mut();
 
     let lanes = LANES as i32;
-
-    const STEP_X: i32 = 4;
-    const STEP_Y: i32 = 1;
 
     for &[p0, p1, p2] in tris {
         let v0 = &vert[p2 as usize];
@@ -305,11 +324,7 @@ pub fn draw_triangles_opt<V: Vertex>(
         let p2i = p2.xy().to_i32();
 
         let min = p0i.min(p1i).min(p2i).max(Vec2i::repeat(0));
-        // min.x = min.x.next_multiple_of(-STEP_X).max(0);
-        // min.y = min.y.next_multiple_of(-STEP_Y).max(0);
         let max = p0i.max(p1i).max(p2i).min(Vec2i::from([width, height]));
-        // max.x = max.x.next_multiple_of(STEP_X).min(width);
-        // max.y = max.y.next_multiple_of(STEP_Y).min(height);
 
         // 2 times the area of the triangle
         let tri_area = orient_2d_i32(p0i, p1i, p2i) as f32;
@@ -318,33 +333,9 @@ pub fn draw_triangles_opt<V: Vertex>(
             continue;
         }
 
-        // (b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x)
-        // u.x         * (p.y - a.y) - u.y         * (p.x - a.x)
-        // u.x * p.y - u.x * a.y - (u.y * p.x - u.y * a.x);
-        // u.x * p.y - u.x * a.y + u.y * a.x - u.y * p.x;
-        // u.x * p.y - B         + C         - u.y * p.x;
-        // u.x * p.y + (-B)      + C         - u.y * p.x;
-        // u.x * p.y +        (C - B)        - u.y * p.x;
-        // u.x * p.y +           D           - u.y * p.x;
-        // u.x * p.y - u.y * p.x + D;
-
-        let p = min.splat() + IVec2xX::from([Simd::from([0, 1, 2, 3]), Simd::from([0, 0, 0, 0])]);
-        // let p = min.splat() + IVec2xX::from([Simd::from([0, 1, 0, 1]), Simd::from([0, 0, 1, 1])]);
-
-        let u_12 = p2i - p1i;
-        let c_12 = u_12.y * p1i.x - u_12.x * p1i.y;
-        let w0_inc = Vec2i::from([-u_12.y * STEP_X, u_12.x * STEP_Y]).splat();
-        let mut w0_row = Simd::splat(u_12.x) * p.y - Simd::splat(u_12.y) * p.x + Simd::splat(c_12);
-
-        let u_20 = p0i - p2i;
-        let c_20 = u_20.y * p2i.x - u_20.x * p2i.y;
-        let w1_inc = Vec2i::from([-u_20.y * STEP_X, u_20.x * STEP_Y]).splat();
-        let mut w1_row = Simd::splat(u_20.x) * p.y - Simd::splat(u_20.y) * p.x + Simd::splat(c_20);
-
-        let u_01 = p1i - p0i;
-        let c_01 = u_01.y * p0i.x - u_01.x * p0i.y;
-        let w2_inc = Vec2i::from([-u_01.y * STEP_X, u_01.x * STEP_Y]).splat();
-        let mut w2_row = Simd::splat(u_01.x) * p.y - Simd::splat(u_01.y) * p.x + Simd::splat(c_01);
+        let (w0_inc, mut w0_row) = orient_2d_step(p1i, p2i, min);
+        let (w1_inc, mut w1_row) = orient_2d_step(p2i, p0i, min);
+        let (w2_inc, mut w2_row) = orient_2d_step(p0i, p1i, min);
 
         let mut row_start = min.y as usize * stride + min.x as usize;
         for y in (min.y..=max.y).step_by(STEP_Y as usize) {
@@ -360,29 +351,19 @@ pub fn draw_triangles_opt<V: Vertex>(
                         w1.cast::<f32>(),
                         w2.cast::<f32>()
                     ]) / Simd::splat(tri_area);
-                    let interp = V::interpolate_simd(w, v0, v1, v2);
                     let z = w.x * Simd::splat(p0.z) + w.y * Simd::splat(p1.z) + w.z * Simd::splat(p2.z);
-                    let depth = unsafe {
-                        let ptr = &depth_buf[idx] as *const f32;
-                        Simd::from(*ptr.cast::<[f32; LANES]>())
-                    };
+                    let depth = Simd::from(unroll_array!(i = 0, 1, 2, 3 => depth_buf[idx+i]));
                     let mask = mask & (z.simd_gt(depth));
-                    let prev_color = unroll_array!(i = 0, 1, 2, 3 => pixels[idx+i]);
-                    let prev_color = unsafe {
-                        let ptr = &pixels[idx] as *const Pixel;
-                        *ptr.cast::<[Pixel; LANES]>()
-                    };
-                    let prev_color = Vec::<Simd<u8, LANES>, 4>::from(unroll_array!(i = 0, 1, 2, 3 => {
-                        Simd::from(unroll_array!(j = 0, 1, 2, 3 => prev_color[j][i]))
-                    }));
-                    let mask_i8 = mask.cast::<i8>();
-
-                    let color = frag_shader(mask, interp)
+                    let interp = V::interpolate_simd(w, v0, v1, v2);
+                    let colors = frag_shader(mask, interp)
                         .map_4(|el| (el.simd_clamp(Simd::splat(-1.0), Simd::splat(1.0)) * Simd::splat(255.0)).cast::<u8>())
-                        .zip_with_4(prev_color, |el, prev| mask_i8.select(el, prev));
+                        .simd_transpose_4() // Convert from SoA to AoS
+                        .to_array();
 
                     unroll!(i = 0, 1, 2, 3 => {
-                        pixels[idx+i] = color.map_4(|el| el.as_array()[i]).to_array();
+                        if mask.test(i) {
+                            pixels[idx+i] = colors[i].to_array();
+                        }
                     });
 
                     let new_depth = mask.select(z, depth).to_array();

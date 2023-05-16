@@ -310,6 +310,38 @@ impl<T: Float> Vec<T, 4> {
     }
 }
 
+impl<T: SimdElement> Vec<Simd<T, 4>, 4> {
+    // source: https://fgiesen.wordpress.com/2013/07/09/simd-transposes-1/
+    pub fn simd_transpose_4(self) -> Self {
+        // Initial (SoA):
+        //
+        //    X = { x0, x1, x2, x3 }
+        //    Y = { y0, y1, y2, y3 }
+        //    Z = { z0, z1, z2, z3 }
+        //    W = { w0, w1, w2, w3 }
+
+        let (a0, a2) = self.x.interleave(self.z);
+        let (a1, a3) = self.y.interleave(self.w);
+
+        //   a0 = { x0, z0, x1, z1 }
+        //   a1 = { y0, w0, y1, w1 }
+        //   a2 = { x2, z2, x3, z3 }
+        //   a3 = { y2, w2, y3, w3 }
+
+        let (p0, p1) = a0.interleave(a1);
+        let (p2, p3) = a2.interleave(a3);
+
+        // Final (AoS):
+        //
+        //   p0 = { x0, y0, z0, w0 }
+        //   p1 = { x1, y1, z1, w1 }
+        //   p2 = { x2, y2, z2, w2 }
+        //   p3 = { x3, y3, z3, w3 }
+
+        Vec::from([p0, p1, p2, p3])
+    }
+}
+
 impl<T, const N: usize> From<[T; N]> for Vec<T, N> {
     fn from(value: [T; N]) -> Self {
         Mat(unsafe { std::mem::transmute_copy::<[T; N], [[T; 1]; N]>(&value) })
