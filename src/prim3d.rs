@@ -2,12 +2,7 @@ use std::simd::{Simd, SupportedLaneCount, LaneCount, Mask};
 
 use crate::buf::{MatrixSliceMut, PixelBuf};
 use crate::vec::{Vec, Vec3, Vec4, Vec2i, Vec3i};
-use crate::{triangles_iter, ScreenPos};
-use crate::Pixel;
-
-fn to_screen_pos(v: Vec4) -> ScreenPos {
-    (v.x as i32, v.y as i32, v.z)
-}
+use crate::{SimdAttribute, triangles_iter, ScreenPos, unroll, unroll_array};
 
 /*
 pub fn draw_line(
@@ -146,13 +141,6 @@ pub trait Vertex {
     ) -> Self::SimdAttr<LANES>
     where
         LaneCount<LANES>: SupportedLaneCount;
-    // {
-    //     std::array::from_fn::<Self::Attr, LANES, _>(|i| {
-    //         let wi = Vec3::from([w.x.as_array()[i], w.y.as_array()[i], w.z.as_array()[i]]);
-    //         Self::interpolate(wi, v0, v1, v2)
-    //     })
-    //     .into()
-    // }
 }
 
 pub fn draw_triangles<V: Vertex>(
@@ -252,33 +240,14 @@ type Vec4xX = Vec<Simd<f32, LANES>, 4>;
 type Vec3xX = Vec<Simd<f32, LANES>, 3>;
 type IVec2xX = Vec<Simd<i32, LANES>, 2>;
 
-macro_rules! unroll_array {
-    ($v:ident = $($values:literal),* => $e:expr) => {
-        [$({
-            let $v = $values;
-            $e
-        }),*]
-    }
-}
-
-macro_rules! unroll {
-    ($v:ident = $($values:literal),* => $e:expr) => {
-        $(
-            let $v = $values;
-            $e;
-        )*
-    }
-}
-
 pub fn draw_triangles_opt<V: Vertex>(
     vert: &[V],
     tris: &[[u32; 3]],
     mut frag_shader: impl FnMut(Mask<i32, LANES>, V::SimdAttr<LANES>) -> Vec4xX,
-    mut pixels: PixelBuf,
-    mut depth_buf: MatrixSliceMut<f32>,
+    pixels: PixelBuf,
+    depth_buf: MatrixSliceMut<f32>,
 ) {
-    use crate::vec::{IVec2x4, IVec3x4, Vec3x4, Vec4x4};
-    use std::simd::{Simd, SimdPartialOrd, SimdFloat};
+    use std::simd::{SimdPartialOrd, SimdFloat};
 
     const STEP_X: i32 = 4;
     const STEP_Y: i32 = 1;
@@ -308,8 +277,6 @@ pub fn draw_triangles_opt<V: Vertex>(
     let pixels = pixels.as_slice_mut();
     let depth_buf = depth_buf.as_slice_mut();
 
-    let lanes = LANES as i32;
-
     for &[p0, p1, p2] in tris {
         let v0 = &vert[p2 as usize];
         let v1 = &vert[p1 as usize];
@@ -324,7 +291,7 @@ pub fn draw_triangles_opt<V: Vertex>(
         let p2i = p2.xy().to_i32();
 
         let min = p0i.min(p1i).min(p2i).max(Vec2i::repeat(0));
-        let max = p0i.max(p1i).max(p2i).min(Vec2i::from([width, height]));
+        let max = p0i.max(p1i).max(p2i).min(Vec2i::from([width - STEP_X, height - STEP_Y]));
 
         // 2 times the area of the triangle
         let tri_area = orient_2d_i32(p0i, p1i, p2i) as f32;
@@ -338,12 +305,12 @@ pub fn draw_triangles_opt<V: Vertex>(
         let (w2_inc, mut w2_row) = orient_2d_step(p0i, p1i, min);
 
         let mut row_start = min.y as usize * stride + min.x as usize;
-        for y in (min.y..=max.y).step_by(STEP_Y as usize) {
+        for _y in (min.y..=max.y).step_by(STEP_Y as usize) {
             let mut w0 = w0_row;
             let mut w1 = w1_row;
             let mut w2 = w2_row;
             let mut idx = row_start;
-            for x in (min.x..=max.x).step_by(STEP_X as usize) {
+            for _x in (min.x..=max.x).step_by(STEP_X as usize) {
                 let mask = (w0 | w1 | w2).simd_ge(Simd::splat(0));
                 if mask.any() {
                     let w = Vec3xX::from([
@@ -360,16 +327,20 @@ pub fn draw_triangles_opt<V: Vertex>(
                         .simd_transpose_4() // Convert from SoA to AoS
                         .to_array();
 
-                    unroll!(i = 0, 1, 2, 3 => {
-                        if mask.test(i) {
-                            pixels[idx+i] = colors[i].to_array();
+                    unroll! {
+                        for i in [0, 1, 2, 3] {
+                            if mask.test(i) {
+                                pixels[idx+i] = colors[i].to_array();
+                            }
                         }
-                    });
+                    };
 
                     let new_depth = mask.select(z, depth).to_array();
-                    unroll!(i = 0, 1, 2, 3 => {
-                        depth_buf[idx+i] = new_depth[i];
-                    });
+                    unroll! {
+                        for i in [0, 1, 2, 3] {
+                            depth_buf[idx+i] = new_depth[i];
+                        }
+                    };
                 }
                 w0 += w0_inc.x;
                 w1 += w1_inc.x;
@@ -534,6 +505,7 @@ impl Iterator for LineToIter {
 */
 
 #[inline(always)]
+#[allow(dead_code)]
 fn barycentric_coords(
     (x, y): (f32, f32),
     (x1, y1): (f32, f32),
@@ -549,11 +521,13 @@ fn barycentric_coords(
 }
 
 #[inline(always)]
+#[allow(dead_code)]
 fn depth_barycentric(l: Vec3, z0: f32, z1: f32, z2: f32) -> f32 {
     z0 * l.x + z1 * l.y + z2 * l.z
 }
 
 #[inline(always)]
+#[allow(dead_code)]
 fn triangle_depth((x, y): (i32, i32), p0: ScreenPos, p1: ScreenPos, p2: ScreenPos) -> f32 {
     let lambda = barycentric_coords(
         (x as f32, y as f32),

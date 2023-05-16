@@ -100,6 +100,16 @@ impl<T: Num, const N: usize> Mat<T, N, N> {
     }
 }
 
+impl<T: Num> Mat<T, 4, 4> {
+    pub fn translate(self, translation: Vec<T, 3>) -> Self {
+        translation.to_translation() * self
+    }
+
+    pub fn scale(self, factor: Vec<T, 3>) -> Self {
+        factor.to_scale() * self
+    }
+}
+
 impl<T: Float> Mat<T, 4, 4> {
     #[rustfmt::skip]
     pub fn rotation_x(theta: T) -> Self {
@@ -135,6 +145,10 @@ impl<T: Float> Mat<T, 4, 4> {
              [ sin, cos,   z,   z],
              [   z,   z,   o,   z],
              [   z,   z,   z,   o]])
+    }
+
+    pub fn rotate(self, euler_angles: Vec<T, 3>) -> Self {
+        euler_angles.to_rotation() * self
     }
 }
 
@@ -828,7 +842,6 @@ macro_rules! impl_num_float_simd {
         impl_num_float_simd!($ty);
     };
     ($ty:ty) => {
-
         impl<const N: usize> Num for Simd<$ty, N>
         where
             LaneCount<N>: SupportedLaneCount,

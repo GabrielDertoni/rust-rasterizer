@@ -6,7 +6,8 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-image = { version = "0.24.6", default-features = false, features = ["png"] }
+anyhow = "1.0.71"
+image = { version = "0.24.6", default-features = false, features = ["png", "jpeg"] }
 pixels = "0.12"
 winit = "0.28"
 
@@ -17,5 +18,5 @@ criterion = { version = "0.4", features = ["html_reports"] }
 name = "triangle_rasterization"
 harness = false
 
-[profiles.release]
+[profile.release]
 debug = true

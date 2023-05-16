@@ -16,10 +16,10 @@ use rasterization::{
     clear_color,
     compute_normals,
     Vert,
-    obj,
+    obj::Obj,
     buf,
     prim3d,
-    vec::{self, Vec3, Vec4, Mat4x4},
+    vec::{self, Vec2, Vec3, Mat4x4},
 };
 
 const WIDTH: u32 = 720;
@@ -68,14 +68,15 @@ fn main() {
                 ..
             } => match (state, virtual_keycode) {
                 (ElementState::Pressed, VirtualKeyCode::Space) => world.toggle_pause(),
+                (ElementState::Pressed, VirtualKeyCode::V) => world.axis.z = 1.0,
+                (ElementState::Pressed, VirtualKeyCode::C) => world.axis.z = -1.0,
+                (ElementState::Released, VirtualKeyCode::V | VirtualKeyCode::C) => world.axis.z = 0.0,
                 (ElementState::Pressed, VirtualKeyCode::W) => world.axis.y = 1.0,
-                (ElementState::Released, VirtualKeyCode::W) => world.axis.y = 0.0,
                 (ElementState::Pressed, VirtualKeyCode::S) => world.axis.y = -1.0,
-                (ElementState::Released, VirtualKeyCode::S) => world.axis.y = 0.0,
+                (ElementState::Released, VirtualKeyCode::W | VirtualKeyCode::S) => world.axis.y = 0.0,
                 (ElementState::Pressed, VirtualKeyCode::A) => world.axis.x = 1.0,
-                (ElementState::Released, VirtualKeyCode::A) => world.axis.x = 0.0,
                 (ElementState::Pressed, VirtualKeyCode::D) => world.axis.x = -1.0,
-                (ElementState::Released, VirtualKeyCode::D) => world.axis.x = 0.0,
+                (ElementState::Released, VirtualKeyCode::A | VirtualKeyCode::D) => world.axis.x = 0.0,
                 _ => (),
             },
             Event::MainEventsCleared => {
@@ -93,26 +94,65 @@ fn main() {
 struct World {
     vert: Vec<Vert>,
     tris: Vec<[u32; 3]>,
+    texture: image::RgbaImage,
     depth_buf: Vec<f32>,
     camera_pos: Vec3,
+    look_at: Vec3,
+    last_render_times: [Duration; 10],
     theta: f32,
     is_paused: bool,
-    axis: Vec2,
+    axis: Vec3,
 }
 
 impl World {
     fn new() -> Self {
-        let obj::Obj { vert, tris } = obj::load_obj("teapot.obj".as_ref()).unwrap();
-        let vert = compute_normals(&vert, &tris);
+        // let mut obj = Obj::load("teapot.obj".as_ref()).unwrap();
+        let mut obj = Obj::load("Skull/12140_Skull_v3_L2.obj".as_ref()).unwrap();
+        /*
+        let vert = if obj.has_normals() && obj.has_texture() {
+            obj.iter_vertices()
+                .map(|vert| Vert {
+                    position: vert.position,
+                    normal: vert.normal,
+                    texture: vert.texture,
+                })
+                .collect::<Vec<_>>()
+        } else {
+            let mut vert = obj.vert.iter()
+                .map(|&position| Vert {
+                    position,
+                    normal: Vec3::zero(),
+                    texture: Vec2::zero(),
+                })
+                .collect::<Vec<_>>();
+            compute_normals(&mut vert, &obj.tris);
+            vert
+        };
+        */
+        let mut vert = obj.vert.iter()
+            .map(|&position| Vert {
+                position,
+                normal: Vec3::zero(),
+                texture: Vec2::zero(),
+            })
+            .collect::<Vec<_>>();
+        compute_normals(&mut vert, &obj.tris);
+        // assert_eq!(obj.materials.len(), 1);
         World {
-            tris,
             vert,
+            tris: obj.tris,
+            texture: if obj.materials.len() == 0 {
+                Default::default()
+            } else {
+                std::mem::take(&mut obj.materials[0].map_kd)
+            },
             depth_buf: vec![0.0; (WIDTH * HEIGHT) as usize],
-            camera_pos: Vec3::from([0.0, 0.0, -1.0]),
+            camera_pos: Vec3::from([0.0, 1.0, -1.0]),
+            look_at: Vec3::from([0.0, 1.0, 0.0]),
+            last_render_times: [Duration::ZERO; 10],
             theta: 0.0,
->>>>>>> origin/main
             is_paused: true,
-            axis: Vec2::zero(),
+            axis: Vec3::zero(),
         }
     }
 
@@ -122,7 +162,7 @@ impl World {
         let mut pixels = buf::PixelBuf::new(pixels, WIDTH as usize, HEIGHT as usize);
 
         if !self.is_paused {
-            self.theta += dt.as_secs_f32() * std::f32::consts::PI / 4.0;
+            self.theta -= dt.as_secs_f32() * std::f32::consts::PI / 4.0;
         }
 
         clear_color(pixels.borrow(), 0x00_00_00_ff);
@@ -134,39 +174,74 @@ impl World {
             *d = f32::MIN;
         }
 
-        let model = Mat4x4::rotation_x(self.theta);
+        let model = Mat4x4::rotation_x(self.theta)
+            * Vec3::repeat(1.0/15.0).to_scale();
 
-        self.camera_pos.x += self.axis.x * dt.as_secs_f32();
-        self.camera_pos.y += self.axis.y * dt.as_secs_f32();
+        self.camera_pos += self.axis * dt.as_secs_f32();
+        // self.look_at.x += self.axis.x * dt.as_secs_f32();
+        // self.look_at.y += self.axis.y * dt.as_secs_f32();
 
-        let look = (self.camera_pos - look_at).normalize();
-        let right = look.cross(camera_up);
-        let up = right.cross(look);
+        /*
+        let rho = self.camera_pos.z;
+        let camera_pos = rho * Vec3::from([
+            self.camera_pos.x.sin() * self.camera_pos.y.cos(),
+            self.camera_pos.x.sin() * self.camera_pos.y.sin(),
+            self.camera_pos.x.cos(),
+        ]);
+        */
+
+        let eye = self.camera_pos;
+
+        let up = Vec3::from([0.0, 1.0, 0.0]);
+
+        let zaxis = (self.look_at - eye).normalized();
+        let xaxis = up.cross(zaxis).normalized();
+        let yaxis = xaxis.cross(zaxis).normalized();
 
         let view = Mat4x4::from([
-            [right.x, right.y, right.z, -self.camera_pos.x],
-            [  up.x,     up.y,    up.z, -self.camera_pos.y],
-            [look.x,  look.y,   look.z, -self.camera_pos.z],
-            [0.0, 0.0, 0.0, 1.0],
+            [xaxis.x, xaxis.y, xaxis.z, -eye.x],
+            [yaxis.x, yaxis.y, yaxis.z, -eye.y],
+            [zaxis.x, zaxis.y, zaxis.z, -eye.z],
+            [   0.0,      0.0,     0.0,    1.0],
         ]);
+
+        let transform = pixels.ndc_to_screen() * view * model;
 
         let vert: Vec<_> = self
             .vert
             .iter()
             .map(|v| Vert {
-                pos: pixels.ndc_to_screen(view * model * v.pos),
+                position: transform * v.position,
                 normal: v.normal,
+                texture: v.texture,
             })
             .collect();
+
+        // let texture = &self.texture;
 
         prim3d::draw_triangles_opt(
             &vert,
             &self.tris,
-            |_mask, n| vec::Vec::from([n.x, n.y, n.z, Simd::splat(1.0)]),
+            |_mask, attrs| {
+                let n = attrs.normal;
+                vec::Vec::from([n.x, n.y, n.z, Simd::splat(1.0)])
+                /*
+                let [u, v] = attrs.texture.to_array();
+                let x = (u * Simd::splat(texture.width()  as f32)).cast::<usize>();
+                let y = (v * Simd::splat(texture.height() as f32)).cast::<usize>();
+                let idx = y * Simd::splat(texture.width() as usize) + x;
+                Simd::gather_or_default(&texture, idx)
+                */
+            },
             pixels.borrow(),
             depth_buf.borrow(),
         );
-        println!("render time: {:?}", start.elapsed());
+        self.last_render_times.rotate_left(1);
+        self.last_render_times[self.last_render_times.len() - 1] = start.elapsed();
+        let render_time = self.last_render_times
+            .iter()
+            .sum::<Duration>() / self.last_render_times.len() as u32;
+        println!("render time: {render_time:?}");
     }
 
     fn toggle_pause(&mut self) {
@@ -174,10 +249,10 @@ impl World {
     }
 }
 
+/*
+#[allow(dead_code)]
 fn debug() {
     use image::{ImageBuffer, ImageFormat, Rgba, Luma};
-
-    use rasterization::vec::Vec4x4;
 
     println!("Allocating buffers");
     let mut im_buf = ImageBuffer::<Rgba<u8>, _>::new(WIDTH, HEIGHT);
@@ -195,11 +270,11 @@ fn debug() {
     clear_color(pixels.borrow(), 0x00_00_00_ff);
 
     println!("Reading .obj");
-    let obj = obj::load_obj("teapot.obj".as_ref()).unwrap();
+    let obj = Obj::load("teapot.obj".as_ref()).unwrap();
     let mut vert = compute_normals(&obj.vert, &obj.tris);
 
     for v in &mut vert {
-        v.pos = pixels.ndc_to_screen(v.pos);
+        v.pos = pixels.ndc_to_screen() * v.pos;
     }
 
     let start = std::time::Instant::now();
@@ -230,3 +305,4 @@ fn debug() {
         .write_to(&mut f, ImageFormat::Png)
         .unwrap();
 }
+*/

@@ -1,7 +1,7 @@
 use std::marker::PhantomData;
 use std::ops::{Bound, Index, IndexMut, RangeBounds};
 
-use crate::vec::Vec4;
+use crate::vec::{Vec3, Mat4x4};
 use crate::Pixel;
 
 pub type PixelBuf<'a> = MatrixSliceMut<'a, Pixel>;
@@ -72,7 +72,7 @@ impl<'a, E> MatrixSliceMut<'a, E> {
         unsafe { std::slice::from_raw_parts_mut(self.ptr, self.width * self.height) }
     }
 
-    pub fn ndc_to_screen(&self, p: Vec4) -> Vec4 {
+    pub fn ndc_to_screen(&self) -> Mat4x4 {
         /*
         p
             // flip y axis and scale range from [-1, 1] -> [-0.5, 0.5]
@@ -82,12 +82,10 @@ impl<'a, E> MatrixSliceMut<'a, E> {
             // scale range from [0.0, 1.0] -> [0.0, width]
             .hom_scale(Vec3::from([self.width as f32, self.height as f32, 1.0]))
         */
-        Vec4::from([
-            (p.x + 1.0) * self.width as f32 / 2.0,
-            (1.0 - p.y) * self.height as f32 / 2.0,
-            p.z,
-            1.0,
-        ])
+
+        Vec3::from([self.width as f32, self.height as f32, 1.0]).to_scale()
+            * Vec3::from([0.5, 0.5, 0.0]).to_translation()
+            * Vec3::from([0.5, -0.5, 1.0]).to_scale()
     }
 
     pub fn borrow<'b>(&'b mut self) -> MatrixSliceMut<'b, E> {
