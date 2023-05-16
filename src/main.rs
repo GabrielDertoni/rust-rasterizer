@@ -14,7 +14,7 @@ pub mod buf;
 pub mod prim3d;
 pub mod vec;
 
-use vec::{Mat, Vec3, Vec4};
+use vec::{Mat, Vec2, Vec3, Vec4};
 
 use crate::vec::Mat4x4;
 
@@ -55,15 +55,26 @@ fn main() {
                     WindowEvent::KeyboardInput {
                         input:
                             KeyboardInput {
-                                state: ElementState::Pressed,
-                                virtual_keycode: Some(VirtualKeyCode::Space),
+                                state,
+                                virtual_keycode: Some(virtual_keycode),
                                 ..
                             },
                         is_synthetic: false,
                         ..
                     },
                 ..
-            } => world.toggle_pause(),
+            } => match (state, virtual_keycode) {
+                (ElementState::Pressed, VirtualKeyCode::Space) => world.toggle_pause(),
+                (ElementState::Pressed, VirtualKeyCode::W) => world.axis.y = 1.0,
+                (ElementState::Released, VirtualKeyCode::W) => world.axis.y = 0.0,
+                (ElementState::Pressed, VirtualKeyCode::S) => world.axis.y = -1.0,
+                (ElementState::Released, VirtualKeyCode::S) => world.axis.y = 0.0,
+                (ElementState::Pressed, VirtualKeyCode::A) => world.axis.x = 1.0,
+                (ElementState::Released, VirtualKeyCode::A) => world.axis.x = 0.0,
+                (ElementState::Pressed, VirtualKeyCode::D) => world.axis.x = -1.0,
+                (ElementState::Released, VirtualKeyCode::D) => world.axis.x = 0.0,
+                _ => (),
+            },
             Event::MainEventsCleared => {
                 let dt = start.elapsed();
                 start = Instant::now();
@@ -80,8 +91,10 @@ struct World {
     vert: Vec<Vec4>,
     tris: Vec<[u32; 3]>,
     depth_buf: Vec<f32>,
+    camera_pos: Vec3,
     acc: f32,
     is_paused: bool,
+    axis: Vec2,
 }
 
 impl World {
@@ -109,8 +122,10 @@ impl World {
             tris,
             vert,
             depth_buf: vec![0.0; (WIDTH * HEIGHT) as usize],
+            camera_pos: Vec3::from([0.0, 0.0, -1.0]),
             acc: 0.0,
             is_paused: true,
+            axis: Vec2::zero(),
         }
     }
 
@@ -132,11 +147,32 @@ impl World {
             *d = f32::MIN;
         }
 
+        /*
         let model = Vec3::from([-0.5, -0.5, 0.0]).to_translation()
             * Mat4x4::rotation_x(self.acc + std::f32::consts::PI / 4.0)
             * Vec3::from([0.3, 1.0, 1.0]).to_scale();
+        */
+        let model = Mat4x4::identity()
+            .rotate(Vec3::from([self.acc, 0.0, 0.0]));
 
-        let vert: Vec<_> = self.vert.iter().copied().map(|v| model * v).collect();
+        let look_at = Vec3::zero();
+        let camera_up = Vec3::from([0.0, -1.0, 0.0]);
+
+        self.camera_pos.x += self.axis.x * dt.as_secs_f32();
+        self.camera_pos.y += self.axis.y * dt.as_secs_f32();
+
+        let look = (self.camera_pos - look_at).normalize();
+        let right = look.cross(camera_up);
+        let up = right.cross(look);
+
+        let view = Mat4x4::from([
+            [right.x, right.y, right.z, -self.camera_pos.x],
+            [up.x, up.y, up.z, -self.camera_pos.y],
+            [look.x, look.y, look.z, -self.camera_pos.z],
+            [0.0, 0.0, 0.0, 1.0],
+        ]);
+
+        let vert: Vec<_> = self.vert.iter().copied().map(|v| view * model * v).collect();
 
         for [p0, p1, p2] in triangles_iter(&vert, &self.tris) {
             let cross = (p0 - p1).xyz().cross((p2 - p1).xyz()).normalize();

@@ -85,7 +85,7 @@ pub fn draw_triangle(
         let l = left_coef + y * left_dx / left_dy;
         let r = right_coef + y * right_dx / right_dy;
         for x in l..=r {
-            if !(x >= 0 && x <= pixels.width as i32 && y >= 0 && y < pixels.height as i32) {
+            if !(x >= 0 && x < pixels.width as i32 && y >= 0 && y < pixels.height as i32) {
                 continue;
             }
             let depth = triangle_depth((x, y), p0, p1, p2);
