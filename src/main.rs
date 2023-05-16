@@ -26,6 +26,8 @@ const WIDTH: u32 = 720;
 const HEIGHT: u32 = 720;
 
 fn main() {
+    // debug();
+    // return;
     let event_loop = EventLoop::new();
     let window = WindowBuilder::new()
         .with_title("rasterizer")

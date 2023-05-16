@@ -188,6 +188,12 @@ impl<T, const N: usize> Vec<T, N> {
     }
 }
 
+impl<T, const M: usize, const N: usize> Vec<[T; M], N> {
+    pub fn as_mat(&self) -> &Mat<T, N, M> {
+        unsafe { std::mem::transmute(self) }
+    }
+}
+
 impl<T: Num, const N: usize> Vec<T, N> {
     pub fn mag_sq(&self) -> T {
         self.0.iter().map(|&[coord]| coord * coord).sum()
@@ -256,6 +262,32 @@ impl<T: Float> Vec<T, 3> {
 
         let v = (target - self * dot).normalized();
         self * theta.cos() + v * theta.sin()
+    }
+}
+
+impl<T: Copy> Vec<T, 4> {
+    #[inline(always)]
+    pub fn map_4<U>(self, mut f: impl FnMut(T) -> U) -> Vec<U, 4> {
+        Vec::from([
+            f(self.x),
+            f(self.y),
+            f(self.z),
+            f(self.w),
+        ])
+    }
+
+    #[inline(always)]
+    pub fn zip_with_4<U: Copy, R>(
+        self,
+        rhs: Vec<U, 4>,
+        mut f: impl FnMut(T, U) -> R,
+    ) -> Vec<R, 4> {
+        Vec::from([
+            f(self.x, rhs.x),
+            f(self.y, rhs.y),
+            f(self.z, rhs.z),
+            f(self.w, rhs.w),
+        ])
     }
 }
 
