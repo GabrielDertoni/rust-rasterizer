@@ -1,9 +1,10 @@
 #![feature(slice_as_chunks, iter_next_chunk, portable_simd, pointer_is_aligned)]
 
+use std::simd::{Mask, Simd};
 use std::time::{Duration, Instant};
-use std::simd::{Simd, Mask};
 
 use pixels::{Pixels, SurfaceTexture};
+use rasterization::vec::Num;
 use winit::{
     dpi::LogicalSize,
     event::{ElementState, Event, KeyboardInput, VirtualKeyCode, WindowEvent},
@@ -12,14 +13,11 @@ use winit::{
 };
 
 use rasterization::{
-    FragShader,
-    SimdAttr,
-    VertBuf,
-    clear_color,
+    buf, clear_color,
     obj::Obj,
-    buf,
     prim3d,
-    vec::{self, Vec3, Mat4x4},
+    vec::{self, Mat4x4, Vec3},
+    FragShader, SimdAttr, VertBuf,
 };
 
 const WIDTH: u32 = 480;
@@ -73,13 +71,19 @@ fn main() {
                 (ElementState::Pressed, VirtualKeyCode::F) => world.toggle_use_filter(),
                 (ElementState::Pressed, VirtualKeyCode::V) => world.axis.z = 1.0,
                 (ElementState::Pressed, VirtualKeyCode::C) => world.axis.z = -1.0,
-                (ElementState::Released, VirtualKeyCode::V | VirtualKeyCode::C) => world.axis.z = 0.0,
+                (ElementState::Released, VirtualKeyCode::V | VirtualKeyCode::C) => {
+                    world.axis.z = 0.0
+                }
                 (ElementState::Pressed, VirtualKeyCode::W) => world.axis.y = 1.0,
                 (ElementState::Pressed, VirtualKeyCode::S) => world.axis.y = -1.0,
-                (ElementState::Released, VirtualKeyCode::W | VirtualKeyCode::S) => world.axis.y = 0.0,
+                (ElementState::Released, VirtualKeyCode::W | VirtualKeyCode::S) => {
+                    world.axis.y = 0.0
+                }
                 (ElementState::Pressed, VirtualKeyCode::A) => world.axis.x = 1.0,
                 (ElementState::Pressed, VirtualKeyCode::D) => world.axis.x = -1.0,
-                (ElementState::Released, VirtualKeyCode::A | VirtualKeyCode::D) => world.axis.x = 0.0,
+                (ElementState::Released, VirtualKeyCode::A | VirtualKeyCode::D) => {
+                    world.axis.x = 0.0
+                }
                 _ => (),
             },
             Event::MainEventsCleared => {
@@ -153,7 +157,7 @@ impl World {
         self.look_at.x += inc.x;
         self.look_at.y += inc.y;
 
-        let model = Mat4x4::rotation_x(self.theta) * Vec3::repeat(1.0/self.scale).to_scale();
+        let model = Mat4x4::rotation_x(self.theta) * Vec3::repeat(1.0 / self.scale).to_scale();
 
         let eye = self.camera_pos;
         let up = Vec3::from([0.0, 1.0, 0.0]);
@@ -164,19 +168,14 @@ impl World {
 
         let view = Mat4x4::from([
             [right.x, right.y, right.z, -right.dot(eye)],
-            [   up.x,    up.y,    up.z,    -up.dot(eye)],
-            [ look.x,  look.y,  look.z,  -look.dot(eye)],
-            [    0.0,     0.0,     0.0,             1.0],
+            [up.x, up.y, up.z, -up.dot(eye)],
+            [look.x, look.y, look.z, -look.dot(eye)],
+            [0.0, 0.0, 0.0, 1.0],
         ]);
 
         let transform = pixels.ndc_to_screen() * view * model;
 
-        let positions: Vec<_> = self
-            .obj
-            .verts
-            .iter()
-            .map(|&p| transform * p)
-            .collect();
+        let positions: Vec<_> = self.obj.verts.iter().map(|&p| transform * p).collect();
 
         let vert_buf = VertBuf {
             positions: &positions,
@@ -184,18 +183,34 @@ impl World {
             uvs: &self.obj.uvs,
         };
 
-        if self.use_filter {
-            let shader = LinearFilteringFragShader::new(&self.obj.materials[0].map_kd);
+        let light_dir = Vec3::from([-0.5, 0.5, 0.0]).normalized();
 
-            prim3d::draw_triangles_opt(
-                &vert_buf,
-                &self.obj.tris,
-                &shader,
-                pixels.borrow(),
-                depth_buf.borrow(),
-            );
+        if self.obj.has_uvs() {
+            if self.use_filter {
+                let shader = LinearFilteringFragShader::new(&self.obj.materials[0].map_kd);
+
+                prim3d::draw_triangles_opt(
+                    &vert_buf,
+                    &self.obj.tris,
+                    &shader,
+                    pixels.borrow(),
+                    depth_buf.borrow(),
+                );
+            } else {
+                let shader =
+                    TextureMappingFragShader::new(light_dir, model, &self.obj.materials[0].map_kd);
+
+                prim3d::draw_triangles_opt(
+                    &vert_buf,
+                    &self.obj.tris,
+                    &shader,
+                    pixels.borrow(),
+                    depth_buf.borrow(),
+                );
+            }
         } else {
-            let shader = TextureMappingFragShader::new(&self.obj.materials[0].map_kd);
+            // let shader = ShowNormalsFragShader::new();
+            let shader = FakeLitFragShader::new(light_dir, model);
 
             prim3d::draw_triangles_opt(
                 &vert_buf,
@@ -208,9 +223,8 @@ impl World {
 
         self.last_render_times.rotate_left(1);
         self.last_render_times[self.last_render_times.len() - 1] = start.elapsed();
-        let render_time = self.last_render_times
-            .iter()
-            .sum::<Duration>() / self.last_render_times.len() as u32;
+        let render_time =
+            self.last_render_times.iter().sum::<Duration>() / self.last_render_times.len() as u32;
         println!("render time: {render_time:?}");
     }
 
@@ -224,23 +238,25 @@ impl World {
 }
 
 pub struct TextureMappingFragShader<'a> {
+    light_dir: Vec3,
+    local_to_global: Mat4x4,
     texture_width: u32,
     texture_height: u32,
     texture: &'a [u32],
 }
 
 impl<'a> TextureMappingFragShader<'a> {
-    pub fn new(texture_img: &'a image::RgbaImage) -> Self {
+    pub fn new(light_dir: Vec3, model: Mat4x4, texture_img: &'a image::RgbaImage) -> Self {
         let texture_width = texture_img.width();
         let texture_height = texture_img.height();
         let texture: &[u8] = &*texture_img;
         let ptr = texture.as_ptr().cast::<u32>();
         assert!(ptr.is_aligned());
         // SAFETY: Pointer is aligned
-        let texture = unsafe {
-            std::slice::from_raw_parts(ptr, texture.len() / 4)
-        };
+        let texture = unsafe { std::slice::from_raw_parts(ptr, texture.len() / 4) };
         TextureMappingFragShader {
+            light_dir,
+            local_to_global: model.inverse(),
             texture_width,
             texture_height,
             texture,
@@ -252,19 +268,27 @@ impl<'a> FragShader<4> for TextureMappingFragShader<'a> {
     type SimdAttr = SimdAttr<4>;
 
     fn exec(&self, _mask: Mask<i32, 4>, attrs: SimdAttr<4>) -> vec::Vec<Simd<f32, 4>, 4> {
+        let light = (self.local_to_global.splat() * attrs.normal.to_hom())
+            .xyz()
+            .normalized()
+            .dot(self.light_dir.splat());
+
         let [u, v] = attrs.uv.to_array();
-        let x = u * Simd::splat(self.texture_width  as f32);
+        let x = u * Simd::splat(self.texture_width as f32);
         let y = (Simd::splat(1.0) - v) * Simd::splat(self.texture_height as f32);
 
         let idx = y.cast::<usize>() * Simd::splat(self.texture_width as usize) + x.cast::<usize>();
 
-        vec::Vec::from(
+        let texture_color = vec::Vec::from(
             Simd::gather_or_default(&self.texture, idx)
                 .to_array()
-                .map(|el| Simd::from(el.to_ne_bytes()))
+                .map(|el| Simd::from(el.to_ne_bytes())),
         )
         .simd_transpose_4()
-        .map_4(|el| el.cast::<f32>() / Simd::splat(255.0))
+        .map_4(|el| el.cast::<f32>() / Simd::splat(255.0));
+
+        let lit_color = texture_color.xyz() * light.clamp(Simd::splat(0.2), Simd::splat(1.0));
+        vec::Vec::from([lit_color.x, lit_color.y, lit_color.z, texture_color.w])
     }
 }
 
@@ -282,9 +306,7 @@ impl<'a> LinearFilteringFragShader<'a> {
         let ptr = texture.as_ptr().cast::<u32>();
         assert!(ptr.is_aligned());
         // SAFETY: Pointer is aligned
-        let texture = unsafe {
-            std::slice::from_raw_parts(ptr, texture.len() / 4)
-        };
+        let texture = unsafe { std::slice::from_raw_parts(ptr, texture.len() / 4) };
         LinearFilteringFragShader {
             texture_width,
             texture_height,
@@ -300,7 +322,7 @@ impl<'a> FragShader<4> for LinearFilteringFragShader<'a> {
         use std::simd::SimdFloat;
 
         let [u, v] = attrs.uv.to_array();
-        let x = u * Simd::splat(self.texture_width  as f32);
+        let x = u * Simd::splat(self.texture_width as f32);
         let y = (Simd::splat(1.0) - v) * Simd::splat(self.texture_height as f32);
 
         let idx0 = y.cast::<usize>() * Simd::splat(self.texture_width as usize) + x.cast::<usize>();
@@ -329,7 +351,7 @@ impl<'a> FragShader<4> for LinearFilteringFragShader<'a> {
         let c0 = vec::Vec::from(
             Simd::gather_or_default(&self.texture, idx0)
                 .to_array()
-                .map(|el| Simd::from(el.to_ne_bytes()))
+                .map(|el| Simd::from(el.to_ne_bytes())),
         )
         .simd_transpose_4()
         .map_4(|el| el.cast::<f32>() / Simd::splat(255.0));
@@ -337,7 +359,7 @@ impl<'a> FragShader<4> for LinearFilteringFragShader<'a> {
         let c1 = vec::Vec::from(
             Simd::gather_or_default(&self.texture, idx1)
                 .to_array()
-                .map(|el| Simd::from(el.to_ne_bytes()))
+                .map(|el| Simd::from(el.to_ne_bytes())),
         )
         .simd_transpose_4()
         .map_4(|el| el.cast::<f32>() / Simd::splat(255.0));
@@ -345,7 +367,7 @@ impl<'a> FragShader<4> for LinearFilteringFragShader<'a> {
         let c2 = vec::Vec::from(
             Simd::gather_or_default(&self.texture, idx2)
                 .to_array()
-                .map(|el| Simd::from(el.to_ne_bytes()))
+                .map(|el| Simd::from(el.to_ne_bytes())),
         )
         .simd_transpose_4()
         .map_4(|el| el.cast::<f32>() / Simd::splat(255.0));
@@ -353,7 +375,7 @@ impl<'a> FragShader<4> for LinearFilteringFragShader<'a> {
         let c3 = vec::Vec::from(
             Simd::gather_or_default(&self.texture, idx3)
                 .to_array()
-                .map(|el| Simd::from(el.to_ne_bytes()))
+                .map(|el| Simd::from(el.to_ne_bytes())),
         )
         .simd_transpose_4()
         .map_4(|el| el.cast::<f32>() / Simd::splat(255.0));
@@ -362,7 +384,39 @@ impl<'a> FragShader<4> for LinearFilteringFragShader<'a> {
     }
 }
 
+pub struct FakeLitFragShader {
+    light_dir: Vec3,
+    local_to_global: Mat4x4,
+}
+
+impl FakeLitFragShader {
+    pub fn new(light_dir: Vec3, model: Mat4x4) -> Self {
+        FakeLitFragShader {
+            light_dir,
+            local_to_global: model.inverse(),
+        }
+    }
+}
+
+impl FragShader<4> for FakeLitFragShader {
+    type SimdAttr = SimdAttr<4>;
+
+    fn exec(&self, _mask: Mask<i32, 4>, attrs: SimdAttr<4>) -> vec::Vec<Simd<f32, 4>, 4> {
+        let n = (self.local_to_global.splat() * attrs.normal.to_hom())
+            .xyz()
+            .normalized()
+            .dot(self.light_dir.splat());
+        vec::Vec::from([n, n, n, Simd::splat(1.0)])
+    }
+}
+
 pub struct ShowNormalsFragShader;
+
+impl ShowNormalsFragShader {
+    pub fn new() -> Self {
+        ShowNormalsFragShader
+    }
+}
 
 impl FragShader<4> for ShowNormalsFragShader {
     type SimdAttr = SimdAttr<4>;

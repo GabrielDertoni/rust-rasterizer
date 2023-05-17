@@ -1,8 +1,7 @@
 use std::ops::{
-    Add, AddAssign, Div, DivAssign, Index, IndexMut, Mul, MulAssign, Neg, Sub,
-    SubAssign,
+    Add, AddAssign, Div, DivAssign, Index, IndexMut, Mul, MulAssign, Neg, Sub, SubAssign,
 };
-use std::simd::{LaneCount, Simd, SimdElement, StdFloat, SimdFloat, SimdOrd, SupportedLaneCount};
+use std::simd::{LaneCount, Simd, SimdElement, SimdFloat, SimdOrd, StdFloat, SupportedLaneCount};
 
 pub type Mat4x4 = Mat<f32, 4, 4>;
 
@@ -24,7 +23,7 @@ impl<T: Copy, const M: usize, const N: usize> Mat<T, M, N> {
         rhs: Mat<U, M, N>,
         mut f: impl FnMut(T, U) -> R,
     ) -> Mat<R, M, N> {
-        use std::mem::{MaybeUninit, transmute_copy};
+        use std::mem::{transmute_copy, MaybeUninit};
 
         // SAFETY: Transposing the `MaybeUninit` to the inner type is safe, since we still can't access
         // any real data that might be uninitialized.
@@ -46,21 +45,10 @@ impl<T: Copy, const M: usize, const N: usize> Mat<T, M, N> {
     {
         self.map(|el| Simd::splat(el))
     }
-}
 
-impl<const M: usize, const N: usize> Mat<f32, M, N> {
-    pub fn to_i32(self) -> Mat<i32, M, N> {
-        self.map(|el| el as i32)
-    }
-
-    pub fn to_u8(self) -> Mat<u8, M, N> {
-        self.map(|el| el as u8)
-    }
-}
-
-impl<const M: usize, const N: usize> Mat<i32, M, N> {
-    pub fn to_f32(self) -> Mat<f32, M, N> {
-        self.map(|el| el as f32)
+    pub fn transpose(self) -> Mat<T, N, M> {
+        use std::array::from_fn;
+        Mat::from(from_fn(|j| from_fn(|i| self[(i, j)])))
     }
 }
 
@@ -76,10 +64,14 @@ impl<T: Copy + Ord, const M: usize, const N: usize> Mat<T, M, N> {
 
 impl<T: Num, const M: usize, const N: usize> Mat<T, M, N> {
     #[inline(always)]
-    pub fn zero() -> Self { Mat([[T::zero(); N]; M]) }
+    pub fn zero() -> Self {
+        Mat([[T::zero(); N]; M])
+    }
 
     #[inline(always)]
-    pub fn one()  -> Self { Mat([[T::one() ; N]; M]) }
+    pub fn one() -> Self {
+        Mat([[T::one(); N]; M])
+    }
 
     #[inline(always)]
     pub fn repeat(el: T) -> Self
@@ -87,6 +79,11 @@ impl<T: Num, const M: usize, const N: usize> Mat<T, M, N> {
         T: Copy,
     {
         Mat([[el; N]; M])
+    }
+
+    #[inline(always)]
+    pub fn element_mul(self, rhs: Self) -> Self {
+        self.zip_with(rhs, |lhs, rhs| lhs * rhs)
     }
 }
 
@@ -97,6 +94,22 @@ impl<T: Num, const N: usize> Mat<T, N, N> {
             ret[(i, i)] = T::one();
         }
         ret
+    }
+}
+
+impl<const M: usize, const N: usize> Mat<f32, M, N> {
+    pub fn to_i32(self) -> Mat<i32, M, N> {
+        self.map(|el| el as i32)
+    }
+
+    pub fn to_u8(self) -> Mat<u8, M, N> {
+        self.map(|el| el as u8)
+    }
+}
+
+impl<const M: usize, const N: usize> Mat<i32, M, N> {
+    pub fn to_f32(self) -> Mat<f32, M, N> {
+        self.map(|el| el as f32)
     }
 }
 
@@ -150,6 +163,77 @@ impl<T: Float> Mat<T, 4, 4> {
     pub fn rotate(self, euler_angles: Vec<T, 3>) -> Self {
         euler_angles.to_rotation() * self
     }
+
+    pub fn determinant(&self) -> T {
+        self.0[0][0] * (self.0[1][1] * self.0[2][2] - self.0[2][1] * self.0[1][2])
+            - self.0[1][0] * (self.0[0][1] * self.0[2][2] - self.0[2][1] * self.0[0][2])
+            - (self.0[2][0] * self.0[0][1] * self.0[1][2] - self.0[1][1] * self.0[0][2])
+    }
+
+    pub fn inverse(&self) -> Self {
+        let det = self.determinant();
+        self.adjugate() * (T::one() / det)
+    }
+
+    // source: https://docs.rs/ultraviolet/0.9.1/src/ultraviolet/mat.rs.html#1385-1443
+    pub fn adjugate(&self) -> Self {
+        let [m00, m01, m02, m03] = self.0[0];
+        let [m10, m11, m12, m13] = self.0[1];
+        let [m20, m21, m22, m23] = self.0[2];
+        let [m30, m31, m32, m33] = self.0[3];
+
+        let coef00 = (m22 * m33) - (m32 * m23);
+        let coef02 = (m12 * m33) - (m32 * m13);
+        let coef03 = (m12 * m23) - (m22 * m13);
+
+        let coef04 = (m21 * m33) - (m31 * m23);
+        let coef06 = (m11 * m33) - (m31 * m13);
+        let coef07 = (m11 * m23) - (m21 * m13);
+
+        let coef08 = (m21 * m32) - (m31 * m22);
+        let coef10 = (m11 * m32) - (m31 * m12);
+        let coef11 = (m11 * m22) - (m21 * m12);
+
+        let coef12 = (m20 * m33) - (m30 * m23);
+        let coef14 = (m10 * m33) - (m30 * m13);
+        let coef15 = (m10 * m23) - (m20 * m13);
+
+        let coef16 = (m20 * m32) - (m30 * m22);
+        let coef18 = (m10 * m32) - (m30 * m12);
+        let coef19 = (m10 * m22) - (m20 * m12);
+
+        let coef20 = (m20 * m31) - (m30 * m21);
+        let coef22 = (m10 * m31) - (m30 * m11);
+        let coef23 = (m10 * m21) - (m20 * m11);
+
+        let fac0 = Vec::from([coef00, coef00, coef02, coef03]);
+        let fac1 = Vec::from([coef04, coef04, coef06, coef07]);
+        let fac2 = Vec::from([coef08, coef08, coef10, coef11]);
+        let fac3 = Vec::from([coef12, coef12, coef14, coef15]);
+        let fac4 = Vec::from([coef16, coef16, coef18, coef19]);
+        let fac5 = Vec::from([coef20, coef20, coef22, coef23]);
+
+        let vec0 = Vec::from([m10, m00, m00, m00]);
+        let vec1 = Vec::from([m11, m01, m01, m01]);
+        let vec2 = Vec::from([m12, m02, m02, m02]);
+        let vec3 = Vec::from([m13, m03, m03, m03]);
+
+        let inv0 = vec1.element_mul(fac0) - (vec2.element_mul(fac1)) + vec3.element_mul(fac2);
+        let inv1 = vec0.element_mul(fac0) - (vec2.element_mul(fac3)) + vec3.element_mul(fac4);
+        let inv2 = vec0.element_mul(fac1) - (vec1.element_mul(fac3)) + vec3.element_mul(fac5);
+        let inv3 = vec0.element_mul(fac2) - (vec1.element_mul(fac4)) + vec2.element_mul(fac5);
+
+        let o = T::one();
+        let sign_a = Vec::from([o, -o, o, -o]);
+        let sign_b = Vec::from([-o, o, -o, o]);
+
+        Self::from([
+            inv0.element_mul(sign_a).to_array(),
+            inv1.element_mul(sign_b).to_array(),
+            inv2.element_mul(sign_a).to_array(),
+            inv3.element_mul(sign_b).to_array(),
+        ])
+    }
 }
 
 impl<T, const M: usize, const N: usize> From<[[T; N]; M]> for Mat<T, M, N> {
@@ -182,13 +266,17 @@ impl<T, const N: usize> Vec<T, N> {
     }
 
     pub fn slice<const START: usize, const COUNT: usize>(&self) -> &Vec<T, COUNT> {
-        if START + COUNT > N { panic!("index out of bounds"); }
+        if START + COUNT > N {
+            panic!("index out of bounds");
+        }
         let ptr = self.0.as_ptr();
         unsafe { std::mem::transmute(&*ptr.add(START)) }
     }
 
     pub fn slice_mut<const START: usize, const COUNT: usize>(&mut self) -> &mut Vec<T, COUNT> {
-        if START + COUNT > N { panic!("index out of bounds"); }
+        if START + COUNT > N {
+            panic!("index out of bounds");
+        }
         let ptr = self.0.as_mut_ptr();
         unsafe { std::mem::transmute(&mut *ptr.add(START)) }
     }
@@ -199,6 +287,10 @@ impl<T, const N: usize> Vec<T, N> {
 
     pub fn inplace_mut(arr: &mut [T; N]) -> &mut Self {
         unsafe { std::mem::transmute(arr) }
+    }
+
+    pub fn vtranspose(&self) -> Mat<T, 1, N> {
+        unsafe { std::mem::transmute_copy(self) }
     }
 }
 
@@ -262,6 +354,14 @@ impl<T: Num> Vec<T, 3> {
         ret[(3, 3)] = T::one();
         ret
     }
+
+    pub fn unit_y() -> Self {
+        Self::from([T::zero(), T::one(), T::zero()])
+    }
+
+    pub fn to_hom(self) -> Vec<T, 4> {
+        [self.x, self.y, self.z, T::one()].into()
+    }
 }
 
 impl<T: Float> Vec<T, 3> {
@@ -282,20 +382,11 @@ impl<T: Float> Vec<T, 3> {
 impl<T: Copy> Vec<T, 4> {
     #[inline(always)]
     pub fn map_4<U>(self, mut f: impl FnMut(T) -> U) -> Vec<U, 4> {
-        Vec::from([
-            f(self.x),
-            f(self.y),
-            f(self.z),
-            f(self.w),
-        ])
+        Vec::from([f(self.x), f(self.y), f(self.z), f(self.w)])
     }
 
     #[inline(always)]
-    pub fn zip_with_4<U: Copy, R>(
-        self,
-        rhs: Vec<U, 4>,
-        mut f: impl FnMut(T, U) -> R,
-    ) -> Vec<R, 4> {
+    pub fn zip_with_4<U: Copy, R>(self, rhs: Vec<U, 4>, mut f: impl FnMut(T, U) -> R) -> Vec<R, 4> {
         Vec::from([
             f(self.x, rhs.x),
             f(self.y, rhs.y),
@@ -508,8 +599,12 @@ mod swizzling {
 
     #[macro_export]
     macro_rules! __vec_ident_or_expr {
-        ($self:expr; $field:ident) => { $self.$field };
-        ($self:expr; $e:expr) => { $e };
+        ($self:expr; $field:ident) => {
+            $self.$field
+        };
+        ($self:expr; $e:expr) => {
+            $e
+        };
     }
 
     #[macro_export]
@@ -671,7 +766,7 @@ mod swizzling {
     impl<T> Deref for XYZ<T> {
         type Target = XY<T>;
 
-        fn deref(&self) -> &XY<T>  {
+        fn deref(&self) -> &XY<T> {
             &self._xy
         }
     }
@@ -817,19 +912,29 @@ macro_rules! impl_num_simd_int {
             LaneCount<N>: SupportedLaneCount,
         {
             #[inline(always)]
-            fn zero() -> Self { Simd::splat(0) }
+            fn zero() -> Self {
+                Simd::splat(0)
+            }
 
             #[inline(always)]
-            fn one()  -> Self { Simd::splat(1)  }
+            fn one() -> Self {
+                Simd::splat(1)
+            }
 
             #[inline(always)]
-            fn min(self, rhs: Self)  -> Self { self.simd_min(rhs)  }
+            fn min(self, rhs: Self) -> Self {
+                self.simd_min(rhs)
+            }
 
             #[inline(always)]
-            fn max(self, rhs: Self)  -> Self { self.simd_max(rhs)  }
+            fn max(self, rhs: Self) -> Self {
+                self.simd_max(rhs)
+            }
 
             #[inline(always)]
-            fn clamp(self, min: Self, max: Self)  -> Self { self.simd_clamp(min, max)  }
+            fn clamp(self, min: Self, max: Self) -> Self {
+                self.simd_clamp(min, max)
+            }
         }
     };
 }
@@ -847,19 +952,29 @@ macro_rules! impl_num_float_simd {
             LaneCount<N>: SupportedLaneCount,
         {
             #[inline(always)]
-            fn zero() -> Self { Simd::splat(0.0) }
+            fn zero() -> Self {
+                Simd::splat(0.0)
+            }
 
             #[inline(always)]
-            fn one()  -> Self { Simd::splat(1.0)  }
+            fn one() -> Self {
+                Simd::splat(1.0)
+            }
 
             #[inline(always)]
-            fn min(self, rhs: Self)  -> Self { self.simd_min(rhs)  }
+            fn min(self, rhs: Self) -> Self {
+                self.simd_min(rhs)
+            }
 
             #[inline(always)]
-            fn max(self, rhs: Self)  -> Self { self.simd_max(rhs)  }
+            fn max(self, rhs: Self) -> Self {
+                self.simd_max(rhs)
+            }
 
             #[inline(always)]
-            fn clamp(self, min: Self, max: Self)  -> Self { self.simd_clamp(min, max)  }
+            fn clamp(self, min: Self, max: Self) -> Self {
+                self.simd_clamp(min, max)
+            }
         }
 
         impl<const N: usize> Float for Simd<$ty, N>
