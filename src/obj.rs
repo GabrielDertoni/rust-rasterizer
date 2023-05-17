@@ -13,16 +13,24 @@ macro_rules! implies {
 pub struct Vertex {
     pub position: Vec4,
     pub normal: Vec3,
-    pub texture: Vec2,
+    pub uv: Vec2,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Index {
+    pub position: u32,
+    pub normal: u32,
+    pub uv: u32,
 }
 
 pub struct Obj {
-    pub vert: Vec<Vec4>,
-    pub normal: Vec<Vec3>,
-    pub texture: Vec<Vec2>,
-    // pub tris: Vec<[[u32; 3]; 3]>,
-    pub tris: Vec<[u32; 3]>,
+    pub verts: Vec<Vec4>,
+    pub normals: Vec<Vec3>,
+    pub uvs: Vec<Vec2>,
+    pub tris: Vec<[Index; 3]>,
     pub materials: Vec<Material>,
+    has_normals: bool,
+    has_uvs: bool,
 }
 
 impl Obj {
@@ -30,9 +38,9 @@ impl Obj {
         let obj = std::fs::read_to_string(path)
             .with_context(|| anyhow!("failed to open {path:?}"))?;
         let root = path.parent().unwrap(); // we know it's a file name
-        let mut vert = Vec::new();
-        let mut normal = Vec::new();
-        let mut texture = Vec::new();
+        let mut verts = Vec::new();
+        let mut normals = Vec::new();
+        let mut uvs = Vec::new();
         let mut tris = Vec::new();
         let mut materials = Vec::new();
         for line in obj.lines() {
@@ -41,15 +49,15 @@ impl Obj {
                 Some("v") => {
                     let vec: Vec3 = parse_vertex_coords(it)
                         .with_context(|| "failed to parse position vertex")?;
-                    vert.push(Vec4::from([vec.x, vec.y, vec.z, 1.0]))
+                    verts.push(Vec4::from([vec.x, vec.y, vec.z, 1.0]))
                 },
-                Some("vn") => normal.push({
+                Some("vn") => normals.push({
                     parse_vertex_coords(it)
                         .with_context(|| "failed to parse normal vertex")?
                 }),
-                Some("vt") => texture.push({
+                Some("vt") => uvs.push({
                     let vec: Vec3 = parse_vertex_coords(it)
-                        .with_context(|| "failed to parse texture vertex")?;
+                        .with_context(|| "failed to parse uv vertex")?;
                     vec.xy()
                 }),
                 Some("f") => parse_face_idxs(it, &mut tris)?,
@@ -61,28 +69,81 @@ impl Obj {
                 _ => continue,
             }
         }
-        Ok(Obj {
-            vert,
-            normal,
-            texture,
+        // HACK: The default value for an index is 0, so we must have at least one element as a placeholder.
+        let has_normals = normals.len() > 0;
+        let has_uvs = uvs.len() > 0;
+        if !has_normals {
+            normals.push(Vec3::zero());
+        }
+        if !has_uvs {
+            uvs.push(Vec2::zero());
+        }
+        let obj = Obj {
+            verts,
+            normals,
+            uvs,
             tris,
             materials,
-        })
+            has_normals,
+            has_uvs,
+        };
+        if !obj.check() {
+            return Err(anyhow!("failed in bounds check"));
+        }
+        Ok(obj)
     }
 
     pub fn has_normals(&self) -> bool {
-        implies!(self.vert.len() > 0 => self.normal.len() > 0)
+        self.has_normals
     }
 
-    pub fn has_texture(&self) -> bool {
-        implies!(self.vert.len() > 0 => self.texture.len() > 0)
+    pub fn has_uvs(&self) -> bool {
+        self.has_uvs
     }
 
     pub fn iter_vertices<'a>(&'a self) -> impl Iterator<Item = Vertex> + 'a {
-        self.vert.iter()
-            .zip(&self.normal)
-            .zip(&self.texture)
-            .map(|((&position, &normal), &texture)| Vertex { position, normal, texture })
+        self.verts.iter()
+            .zip(&self.normals)
+            .zip(&self.uvs)
+            .map(|((&position, &normal), &uv)| Vertex { position, normal, uv })
+    }
+
+    pub fn compute_normals(&mut self) {
+        self.normals.clear();
+        for _ in 0..self.verts.len() {
+            self.normals.push(Vec3::zero());
+        }
+
+        for [p0_ix, p1_ix, p2_ix] in &mut self.tris {
+            let i0 = p0_ix.position as usize;
+            let i1 = p1_ix.position as usize;
+            let i2 = p2_ix.position as usize;
+            let p0 = self.verts[i0].xyz();
+            let p1 = self.verts[i1].xyz();
+            let p2 = self.verts[i2].xyz();
+            let n = (p0 - p1).cross(p2 - p1).normalized();
+            self.normals[i0] += n;
+            self.normals[i1] += n;
+            self.normals[i2] += n;
+            // Make the one normal per self.vertsex
+            p0_ix.normal = p0_ix.position;
+            p1_ix.normal = p1_ix.position;
+            p2_ix.normal = p2_ix.position;
+        }
+
+        for n in &mut self.normals {
+            n.normalize();
+        }
+        self.has_normals = true;
+    }
+
+    // Verify if all indices are inbound
+    fn check(&self) -> bool {
+        self.tris.iter().flatten().all(|idx| {
+            idx.position < self.verts.len() as u32
+                && implies!(self.has_normals() => idx.normal < self.normals.len() as u32)
+                && implies!(self.has_uvs() => idx.uv < self.uvs.len() as u32)
+        })
     }
 }
 
@@ -94,29 +155,26 @@ fn parse_vertex_coords<'a, const N: usize>(it: impl Iterator<Item = &'a str>) ->
     Ok(vec::Vec::from(arr))
 }
 
-// fn parse_face_idxs<'a>(it: impl Iterator<Item = &'a str>) -> Result<[[u32; 3]; 3]> {
-fn parse_face_idxs<'a>(it: impl Iterator<Item = &'a str>, v: &mut Vec<[u32; 3]>) -> Result<()> {
+fn parse_face_idxs<'a>(it: impl Iterator<Item = &'a str>, v: &mut Vec<[Index; 3]>) -> Result<()> {
     let idxs =
         it.map(|el| {
             let idxs = el.split('/')
                 .map(|idx| {
                     idx.parse::<u32>()
-                        .map(|i| i - 1)
+                        .map(|i| i - 1) // Convert to 0-based indexing
                         .map_err(Into::into)
                 })
                 .collect::<Result<Vec<_>>>()?;
-
-            /*
             let idxs = match idxs.len() {
-                1 => [idxs[0], 0, 0],
-                2 => [idxs[0], idxs[1], 0],
-                3 => [idxs[0], idxs[1], idxs[2]],
+                1 => Index { position: idxs[0], uv: 0      , normal: 0       },
+                2 => Index { position: idxs[0], uv: idxs[1], normal: 0       },
+                3 => Index { position: idxs[0], uv: idxs[1], normal: idxs[2] },
                 n => return Err(anyhow!("invalid number of face indices {n}")),
             };
-            */
-            anyhow::Ok(idxs[0])
+            Ok(idxs)
         })
         .collect::<Result<Vec<_>>>()?;
+
     match idxs.len() {
         3 => v.push(idxs.try_into().unwrap()),
         4 => {

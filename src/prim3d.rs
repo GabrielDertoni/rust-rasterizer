@@ -1,8 +1,8 @@
-use std::simd::{Simd, SupportedLaneCount, LaneCount, Mask};
+use std::simd::{Simd, SupportedLaneCount, LaneCount};
 
 use crate::buf::{MatrixSliceMut, PixelBuf};
 use crate::vec::{Vec, Vec3, Vec4, Vec2i, Vec3i};
-use crate::{SimdAttribute, triangles_iter, ScreenPos, unroll, unroll_array};
+use crate::{FragShader, triangles_iter, ScreenPos, unroll, unroll_array};
 
 /*
 pub fn draw_line(
@@ -124,23 +124,27 @@ pub fn draw_triangle2(
 }
 */
 
-pub trait Vertex {
-    type Attr;
+pub trait VertexBuf {
+    type Index: Copy;
     type SimdAttr<const LANES: usize>
     where
         LaneCount<LANES>: SupportedLaneCount;
 
-    fn position(&self) -> &Vec3;
-    fn interpolate(w: Vec3, v0: &Self, v1: &Self, v2: &Self) -> Self::Attr;
-
+    fn position(&self, index: Self::Index) -> Vec3;
     fn interpolate_simd<const LANES: usize>(
-        w: Vec<Simd<f32, LANES>, 3>,
-        v0: &Self,
-        v1: &Self,
-        v2: &Self,
+        &self, w: Vec<Simd<f32, LANES>, 3>,
+        v0: Self::Index,
+        v1: Self::Index,
+        v2: Self::Index,
     ) -> Self::SimdAttr<LANES>
     where
         LaneCount<LANES>: SupportedLaneCount;
+}
+
+pub trait Vertex {
+    type Attr;
+    fn position(&self) -> &Vec3;
+    fn interpolate(w: Vec3, v0: &Self, v1: &Self, v2: &Self) -> Self::Attr;
 }
 
 pub fn draw_triangles<V: Vertex>(
@@ -236,17 +240,20 @@ pub fn orient_2d_i32(from: Vec2i, to: Vec2i, p: Vec2i) -> i32 {
 
 const LANES: usize = 4;
 
-type Vec4xX = Vec<Simd<f32, LANES>, 4>;
 type Vec3xX = Vec<Simd<f32, LANES>, 3>;
 type IVec2xX = Vec<Simd<i32, LANES>, 2>;
 
-pub fn draw_triangles_opt<V: Vertex>(
-    vert: &[V],
-    tris: &[[u32; 3]],
-    mut frag_shader: impl FnMut(Mask<i32, LANES>, V::SimdAttr<LANES>) -> Vec4xX,
+pub fn draw_triangles_opt<V, S>(
+    vert: &V,
+    tris: &[[V::Index; 3]],
+    frag_shader: &S,
     pixels: PixelBuf,
     depth_buf: MatrixSliceMut<f32>,
-) {
+)
+where
+    V: VertexBuf,
+    S: FragShader<4, SimdAttr = V::SimdAttr<4>>,
+{
     use std::simd::{SimdPartialOrd, SimdFloat};
 
     const STEP_X: i32 = 4;
@@ -277,14 +284,12 @@ pub fn draw_triangles_opt<V: Vertex>(
     let pixels = pixels.as_slice_mut();
     let depth_buf = depth_buf.as_slice_mut();
 
-    for &[p0, p1, p2] in tris {
-        let v0 = &vert[p2 as usize];
-        let v1 = &vert[p1 as usize];
-        let v2 = &vert[p0 as usize];
+    for &[v0, v1, v2] in tris {
+        let (v0, v1, v2) = (v2, v1, v0);
 
-        let p0 = v0.position();
-        let p1 = v1.position();
-        let p2 = v2.position();
+        let p0 = vert.position(v0);
+        let p1 = vert.position(v1);
+        let p2 = vert.position(v2);
 
         let p0i = p0.xy().to_i32();
         let p1i = p1.xy().to_i32();
@@ -321,8 +326,8 @@ pub fn draw_triangles_opt<V: Vertex>(
                     let z = w.x * Simd::splat(p0.z) + w.y * Simd::splat(p1.z) + w.z * Simd::splat(p2.z);
                     let depth = Simd::from(unroll_array!(i = 0, 1, 2, 3 => depth_buf[idx+i]));
                     let mask = mask & (z.simd_gt(depth));
-                    let interp = V::interpolate_simd(w, v0, v1, v2);
-                    let colors = frag_shader(mask, interp)
+                    let interp = vert.interpolate_simd(w, v0, v1, v2);
+                    let colors = frag_shader.exec(mask, interp)
                         .map_4(|el| (el.simd_clamp(Simd::splat(-1.0), Simd::splat(1.0)) * Simd::splat(255.0)).cast::<u8>())
                         .simd_transpose_4() // Convert from SoA to AoS
                         .to_array();

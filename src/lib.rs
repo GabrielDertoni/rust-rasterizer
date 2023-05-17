@@ -16,9 +16,10 @@ pub mod utils;
 pub type ScreenPos = (i32, i32, f32);
 pub type Pixel = [u8; 4];
 
-use std::simd::{Simd, LaneCount, SupportedLaneCount};
+use std::simd::{Simd, LaneCount, SupportedLaneCount, Mask};
 
 use vec::{Vec, Vec2, Vec3, Vec4};
+use obj::Index;
 
 pub fn triangles_iter<'a, V>(
     vert: &'a [V],
@@ -46,14 +47,53 @@ where
     std::simd::LaneCount<LANES>: std::simd::SupportedLaneCount,
 {
     pub normal: Vec<Simd<f32, LANES>, 3>,
-    pub texture: Vec<Simd<f32, LANES>, 2>,
+    pub uv: Vec<Simd<f32, LANES>, 2>,
+}
+
+#[derive(Clone, Copy)]
+pub struct VertBuf<'a> {
+    pub positions: &'a [Vec4],
+    pub normals: &'a [Vec3],
+    pub uvs: &'a [Vec2],
+}
+
+impl<'a> prim3d::VertexBuf for VertBuf<'a> {
+    type Index = Index;
+    type SimdAttr<const LANES: usize> = SimdAttr<LANES>
+    where
+        std::simd::LaneCount<LANES>: std::simd::SupportedLaneCount;
+
+    fn position(&self, index: Index) -> Vec3 {
+        self.positions[index.position as usize].xyz()
+    }
+
+    fn interpolate_simd<const LANES: usize>(
+        &self,
+        w: vec::Vec<std::simd::Simd<f32, LANES>, 3>,
+        v0: Index,
+        v1: Index,
+        v2: Index,
+    ) -> SimdAttr<LANES>
+    where
+        std::simd::LaneCount<LANES>: std::simd::SupportedLaneCount
+    {
+        let n0 = self.normals[v0.normal as usize].splat();
+        let n1 = self.normals[v1.normal as usize].splat();
+        let n2 = self.normals[v2.normal as usize].splat();
+
+        let uv0 = self.uvs[v0.uv as usize].splat();
+        let uv1 = self.uvs[v1.uv as usize].splat();
+        let uv2 = self.uvs[v2.uv as usize].splat();
+
+        SimdAttr {
+            normal:   w.x *  n0 + w.y *  n1 + w.z *  n2,
+            uv:       w.x * uv0 + w.y * uv1 + w.z * uv2,
+        }
+    }
 }
 
 impl prim3d::Vertex for Vert {
     type Attr = Vec3;
-    type SimdAttr<const LANES: usize> = SimdAttr<LANES>
-    where
-        std::simd::LaneCount<LANES>: std::simd::SupportedLaneCount;
 
     fn position(&self) -> &Vec3 {
         self.position.slice::<0, 3>()
@@ -61,41 +101,6 @@ impl prim3d::Vertex for Vert {
 
     fn interpolate(w: Vec3, v0: &Self, v1: &Self, v2: &Self) -> Vec3 {
         w.x * v0.normal + w.y * v1.normal + w.z * v2.normal
-    }
-
-    fn interpolate_simd<const LANES: usize>(
-        w: vec::Vec<std::simd::Simd<f32, LANES>, 3>,
-        v0: &Self,
-        v1: &Self,
-        v2: &Self,
-    ) -> SimdAttr<LANES>
-    where
-        std::simd::LaneCount<LANES>: std::simd::SupportedLaneCount
-    {
-        SimdAttr {
-            normal: w.x * v0.normal.splat() + w.y * v1.normal.splat() + w.z * v2.normal.splat(),
-            texture: w.x * v0.texture.splat() + w.y * v1.texture.splat() + w.z * v2.texture.splat(),
-        }
-    }
-}
-
-pub fn compute_normals(vert: &mut [Vert], tris: &[[u32; 3]]) {
-    for v in &mut *vert {
-        v.normal = Vec3::zero();
-    }
-
-    for &[p0_ix, p1_ix, p2_ix] in tris {
-        let p0 = vert[p0_ix as usize].position.xyz();
-        let p1 = vert[p1_ix as usize].position.xyz();
-        let p2 = vert[p2_ix as usize].position.xyz();
-        let n = (p0 - p1).cross(p2 - p1).normalized();
-        vert[p0_ix as usize].normal += n;
-        vert[p1_ix as usize].normal += n;
-        vert[p2_ix as usize].normal += n;
-    }
-
-    for v in vert {
-        v.normal.normalize();
     }
 }
 
@@ -155,3 +160,41 @@ impl SimdAttribute for UV {
         w.x * v0.splat() + w.y * v1.splat() + w.z * v2.splat()
     }
 }
+
+pub trait FragShader<const LANES: usize>
+where
+    LaneCount<LANES>: SupportedLaneCount,
+{
+    type SimdAttr;
+
+    fn exec(&self, _mask: Mask<i32, LANES>, attrs: Self::SimdAttr) -> vec::Vec<Simd<f32, LANES>, 4>;
+}
+
+pub struct FromFn<F, A, const LANES: usize> {
+    f: F,
+    _marker: std::marker::PhantomData<A>,
+}
+
+impl<F, A, const LANES: usize> FromFn<F, A, LANES>
+where
+    F: Fn(Mask<i32, LANES>, A) -> vec::Vec<Simd<f32, LANES>, 4>,
+    LaneCount<LANES>: SupportedLaneCount,
+{
+    pub fn new(f: F) -> Self {
+        FromFn { f, _marker: std::marker::PhantomData }
+    }
+}
+
+
+impl<F, A, const LANES: usize> FragShader<LANES> for FromFn<F, A, LANES>
+where
+    F: Fn(Mask<i32, LANES>, A) -> vec::Vec<Simd<f32, LANES>, 4>,
+    LaneCount<LANES>: SupportedLaneCount,
+{
+    type SimdAttr = A;
+
+    fn exec(&self, mask: Mask<i32, LANES>, attrs: A) -> vec::Vec<Simd<f32, LANES>, 4> {
+        (self.f)(mask, attrs)
+    }
+}
+
