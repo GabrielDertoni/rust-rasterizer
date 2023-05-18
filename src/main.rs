@@ -151,11 +151,11 @@ impl World {
 
         let inc = self.axis * dt.as_secs_f32();
 
-        self.scale += inc.z;
-        self.camera_pos.x += inc.x;
-        self.camera_pos.y += inc.y;
-        self.look_at.x += inc.x;
-        self.look_at.y += inc.y;
+        self.scale += inc.z * 2.0;
+        self.camera_pos.x -= inc.x;
+        self.camera_pos.y -= inc.y;
+        self.look_at.x -= inc.x;
+        self.look_at.y -= inc.y;
 
         let model = Mat4x4::rotation_x(self.theta) * Vec3::repeat(1.0 / self.scale).to_scale();
 
