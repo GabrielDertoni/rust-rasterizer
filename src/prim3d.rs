@@ -301,7 +301,13 @@ where
         // 2 times the area of the triangle
         let tri_area = orient_2d_i32(p0i, p1i, p2i) as f32;
 
-        if tri_area <= 0.0 {
+        let nz = {
+            let u = p0 - p1;
+            let v = p2 - p1;
+            u.x * v.y - u.y * v.x
+        };
+
+        if tri_area <= 0.0 || nz >= 0.0 {
             continue;
         }
 
