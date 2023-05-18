@@ -18,5 +18,5 @@ criterion = { version = "0.4", features = ["html_reports"] }
 name = "triangle_rasterization"
 harness = false
 
-[profile.release]
+[profile.bench]
 debug = true

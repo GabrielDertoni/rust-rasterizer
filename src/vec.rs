@@ -265,6 +265,10 @@ impl<T, const N: usize> Vec<T, N> {
         unsafe { std::mem::transmute_copy(&self.0) }
     }
 
+    pub fn as_array(&self) -> &[T; N] {
+        unsafe { std::mem::transmute(self) }
+    }
+
     pub fn slice<const START: usize, const COUNT: usize>(&self) -> &Vec<T, COUNT> {
         if START + COUNT > N {
             panic!("index out of bounds");

@@ -1,8 +1,8 @@
-use std::simd::{Simd, SupportedLaneCount, LaneCount};
+use std::simd::Simd;
 
 use crate::buf::{MatrixSliceMut, PixelBuf};
-use crate::vec::{Vec, Vec3, Vec4, Vec2i, Vec3i};
-use crate::{FragShader, triangles_iter, ScreenPos, unroll, unroll_array};
+use crate::vec::{Vec, Vec2i, Vec3};
+use crate::{FragShader, ScreenPos, VertexBuf};
 
 /*
 pub fn draw_line(
@@ -124,29 +124,7 @@ pub fn draw_triangle2(
 }
 */
 
-pub trait VertexBuf {
-    type Index: Copy;
-    type SimdAttr<const LANES: usize>
-    where
-        LaneCount<LANES>: SupportedLaneCount;
-
-    fn position(&self, index: Self::Index) -> Vec3;
-    fn interpolate_simd<const LANES: usize>(
-        &self, w: Vec<Simd<f32, LANES>, 3>,
-        v0: Self::Index,
-        v1: Self::Index,
-        v2: Self::Index,
-    ) -> Self::SimdAttr<LANES>
-    where
-        LaneCount<LANES>: SupportedLaneCount;
-}
-
-pub trait Vertex {
-    type Attr;
-    fn position(&self) -> &Vec3;
-    fn interpolate(w: Vec3, v0: &Self, v1: &Self, v2: &Self) -> Self::Attr;
-}
-
+/*
 pub fn draw_triangles<V: Vertex>(
     vert: &[V],
     tris: &[[u32; 3]],
@@ -183,7 +161,10 @@ pub fn draw_triangle<V: Vertex>(
     let p2i = p2.xy().to_i32();
 
     let min = p0i.min(p1i).min(p2i).max(Vec2i::repeat(0));
-    let max = p0i.max(p1i).max(p2i).min(Vec2i::from([pixels.width as i32, pixels.height as i32]));
+    let max = p0i
+        .max(p1i)
+        .max(p2i)
+        .min(Vec2i::from([pixels.width as i32, pixels.height as i32]));
 
     // 2 times the area of the triangle
     let tri_area = orient_2d_i32(p0i, p1i, p2i) as f32;
@@ -215,7 +196,7 @@ pub fn draw_triangle<V: Vertex>(
         }
     }
 }
-
+*/
 
 /// Returns the oriented area of the paralelogram formed by the points `from`, `to`, `p`, `from + (p - to)`. The sign
 /// is positive if the points in the paralelogram wind counterclockwise (according to the order given prior) and
@@ -249,12 +230,11 @@ pub fn draw_triangles_opt<V, S>(
     frag_shader: &S,
     pixels: PixelBuf,
     depth_buf: MatrixSliceMut<f32>,
-)
-where
-    V: VertexBuf,
-    S: FragShader<4, SimdAttr = V::SimdAttr<4>>,
+) where
+    V: VertexBuf<4>,
+    S: FragShader<SimdAttr<4> = V::SimdAttr>,
 {
-    use std::simd::{SimdPartialOrd, SimdFloat};
+    use std::simd::SimdPartialOrd;
 
     const STEP_X: i32 = 4;
     const STEP_Y: i32 = 1;
@@ -269,7 +249,11 @@ where
     // u.x * p.y +           D           - u.y * p.x;
     // u.x * p.y - u.y * p.x + D;
     #[inline(always)]
-    fn orient_2d_step(from: Vec2i, to: Vec2i, p: Vec2i) -> (Vec<Simd<i32, LANES>, 2>, Simd<i32, LANES>) {
+    fn orient_2d_step(
+        from: Vec2i,
+        to: Vec2i,
+        p: Vec2i,
+    ) -> (Vec<Simd<i32, LANES>, 2>, Simd<i32, LANES>) {
         let u = to - from;
         let c = u.y * from.x - u.x * from.y;
         let p = p.splat() + IVec2xX::from([Simd::from([0, 1, 2, 3]), Simd::from([0, 0, 0, 0])]);
@@ -295,11 +279,15 @@ where
         let p1i = p1.xy().to_i32();
         let p2i = p2.xy().to_i32();
 
-        let min = p0i.min(p1i).min(p2i).max(Vec2i::repeat(0));
-        let max = p0i.max(p1i).max(p2i).min(Vec2i::from([width - STEP_X, height - STEP_Y]));
+        let mut min = p0i.min(p1i).min(p2i);
+        min.x = min.x.next_multiple_of(-(LANES as i32)).max(0);
+        let max = p0i
+            .max(p1i)
+            .max(p2i)
+            .min(Vec2i::from([width - STEP_X, height - STEP_Y]));
 
         // 2 times the area of the triangle
-        let tri_area = orient_2d_i32(p0i, p1i, p2i) as f32;
+        let tri_area = orient_2d_i32(p0i, p1i, p2i);
 
         let nz = {
             let u = p0 - p1;
@@ -307,13 +295,17 @@ where
             u.x * v.y - u.y * v.x
         };
 
-        if tri_area <= 0.0 || nz >= 0.0 {
+        if tri_area <= 0 || nz >= 0.0 {
             continue;
         }
+
+        let tri = vert.triangle_info(v0, v1, v2, tri_area);
 
         let (w0_inc, mut w0_row) = orient_2d_step(p1i, p2i, min);
         let (w1_inc, mut w1_row) = orient_2d_step(p2i, p0i, min);
         let (w2_inc, mut w2_row) = orient_2d_step(p0i, p1i, min);
+
+        let inv_area = Simd::splat(1.0 / tri_area as f32);
 
         let mut row_start = min.y as usize * stride + min.x as usize;
         for _y in (min.y..=max.y).step_by(STEP_Y as usize) {
@@ -324,34 +316,25 @@ where
             for _x in (min.x..=max.x).step_by(STEP_X as usize) {
                 let mask = (w0 | w1 | w2).simd_ge(Simd::splat(0));
                 if mask.any() {
-                    let w = Vec3xX::from([
-                        w0.cast::<f32>(),
-                        w1.cast::<f32>(),
-                        w2.cast::<f32>()
-                    ]) / Simd::splat(tri_area);
-                    let z = w.x * Simd::splat(p0.z) + w.y * Simd::splat(p1.z) + w.z * Simd::splat(p2.z);
-                    let depth = Simd::from(unroll_array!(i = 0, 1, 2, 3 => depth_buf[idx+i]));
-                    let mask = mask & (z.simd_gt(depth));
-                    let interp = vert.interpolate_simd(w, v0, v1, v2);
-                    let colors = frag_shader.exec(mask, interp)
-                        .map_4(|el| (el.simd_clamp(Simd::splat(-1.0), Simd::splat(1.0)) * Simd::splat(255.0)).cast::<u8>())
-                        .simd_transpose_4() // Convert from SoA to AoS
-                        .to_array();
-
-                    unroll! {
-                        for i in [0, 1, 2, 3] {
-                            if mask.test(i) {
-                                pixels[idx+i] = colors[i].to_array();
-                            }
-                        }
+                    let wi = Vec::from([w0, w1, w2]);
+                    let w = Vec3xX::from([w0.cast::<f32>(), w1.cast::<f32>(), w2.cast::<f32>()])
+                        * inv_area;
+                    let z =
+                        w.x * Simd::splat(p0.z) + w.y * Simd::splat(p1.z) + w.z * Simd::splat(p2.z);
+                    let prev_depth =
+                        unsafe { *depth_buf.as_ptr().add(idx).cast::<Simd<f32, LANES>>() };
+                    let mask = mask & (z.simd_gt(prev_depth));
+                    let interp = vert.interpolate_simd_specialized(wi, w, &tri);
+                    let simd_pixels = unsafe {
+                        &mut *(&mut pixels[idx] as *mut [u8; 4]).cast::<Simd<u32, LANES>>()
                     };
+                    frag_shader.exec_specialized(mask, interp, simd_pixels);
 
-                    let new_depth = mask.select(z, depth).to_array();
-                    unroll! {
-                        for i in [0, 1, 2, 3] {
-                            depth_buf[idx+i] = new_depth[i];
-                        }
-                    };
+                    let new_depth = mask.select(z, prev_depth);
+                    unsafe {
+                        let ptr = &mut depth_buf[idx] as *mut f32;
+                        *ptr.cast::<Simd<f32, LANES>>() = new_depth;
+                    }
                 }
                 w0 += w0_inc.x;
                 w1 += w1_inc.x;
