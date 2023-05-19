@@ -332,6 +332,13 @@ impl<T: Float, const N: usize> Vec<T, N> {
     }
 }
 
+impl<T: Copy> Vec<T, 3> {
+    #[inline(always)]
+    pub fn map_3<U>(self, mut f: impl FnMut(T) -> U) -> Vec<U, 3> {
+        Vec::from([f(self.x), f(self.y), f(self.z)])
+    }
+}
+
 impl<T: Num> Vec<T, 3> {
     pub fn cross(self, rhs: Self) -> Self {
         Self::from([
@@ -559,7 +566,7 @@ macro_rules! impl_mul_lhs {
     };
 }
 
-impl_mul_lhs!(f32, f64, i32);
+impl_mul_lhs!(f32, f64, i32, i64);
 
 impl<T: Num, const M: usize, const K: usize, const N: usize> Mul<Mat<T, K, N>> for Mat<T, M, K> {
     type Output = Mat<T, M, N>;
@@ -880,8 +887,8 @@ impl_num_float!(f32, f64);
 macro_rules! impl_num_int {
     () => {};
     ($ty:ty, $($rest:tt)*) => {
-        impl_num_float!($ty);
-        impl_num_float!($($rest)*);
+        impl_num_int!($ty);
+        impl_num_int!($($rest)*);
     };
     ($ty:ty) => {
         impl Num for $ty {
@@ -903,12 +910,13 @@ macro_rules! impl_num_int {
     };
 }
 
-impl_num_int!(i32);
+impl_num_int!(i32, i64);
 
 macro_rules! impl_num_simd_int {
     () => {};
     ($ty:ty, $($rest:tt)*) => {
-        impl_num_float_simd!($ty);
+        impl_num_simd_int!($ty);
+        impl_num_simd_int!($($rest)*);
     };
     ($ty:ty) => {
         impl<const N: usize> Num for Simd<$ty, N>
@@ -943,7 +951,7 @@ macro_rules! impl_num_simd_int {
     };
 }
 
-impl_num_simd_int!(i32);
+impl_num_simd_int!(i32, i64);
 
 macro_rules! impl_num_float_simd {
     () => {};

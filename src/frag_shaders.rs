@@ -61,7 +61,9 @@ impl<'a> FragShader for TextureMappingFragShader<'a> {
         //     .dot(self.light_dir);
 
         let [u, v] = attrs.uv.to_array();
-        let idx = (v * Simd::splat(self.texture_width) + u).cast();
+        let x = (u * Simd::splat(self.texture_width as f32)).cast::<i32>();
+        let y = ((Simd::splat(1.0) - v) * Simd::splat(self.texture_height as f32)).cast::<i32>();
+        let idx = (y * Simd::splat(self.texture_width) + x).cast();
 
         unsafe {
             *pixels = Simd::gather_select_unchecked(&self.texture, mask.cast(), idx, *pixels);

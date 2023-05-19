@@ -7,7 +7,7 @@ use rasterization::{
     frag_shaders::TextureMappingFragShader,
     obj::Obj,
     prim3d,
-    vec::{Mat4x4, Vec2i, Vec3},
+    vec::{Mat4x4, Vec3},
     VertBuf,
 };
 
@@ -104,19 +104,6 @@ fn model_with_texture(c: &mut Criterion) {
     let transform = pixels.ndc_to_screen() * view * model;
 
     let positions: Vec<_> = verts.iter().map(|&p| transform * p).collect();
-
-    let uvs = {
-        let width = materials[0].map_kd.width();
-        let height = materials[0].map_kd.height();
-        uvs.iter()
-            .map(|uv| {
-                Vec2i::from([
-                    (uv.x * width as f32) as i32,
-                    ((1.0 - uv.y) * height as f32) as i32,
-                ])
-            })
-            .collect::<Vec<_>>()
-    };
 
     let vert_buf = VertBuf {
         positions: &positions,

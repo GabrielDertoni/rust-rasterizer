@@ -5,7 +5,7 @@ use crate::{
     frag_shaders::*,
     obj::Obj,
     prim3d,
-    vec::{Mat4x4, Vec2i, Vec3},
+    vec::{Mat4x4, Vec3},
     VertBuf,
 };
 
@@ -102,27 +102,10 @@ impl World {
             (pos.y * pixels.width as f32 + pos.x) as i32
         });
 
-        let uvs = if self.obj.has_uvs() {
-            let width = self.obj.materials[0].map_kd.width();
-            let height = self.obj.materials[0].map_kd.height();
-            self.obj
-                .uvs
-                .iter()
-                .map(|uv| {
-                    Vec2i::from([
-                        (uv.x * width as f32) as i32,
-                        ((1.0 - uv.y) * height as f32) as i32,
-                    ])
-                })
-                .collect()
-        } else {
-            vec![Vec2i::zero()]
-        };
-
         let vert_buf = VertBuf {
             positions: &positions,
             normals: &self.obj.normals,
-            uvs: &uvs,
+            uvs: &self.obj.uvs,
         };
 
         let light_dir = Vec3::from([-0.5, 0.5, 0.0]).normalized();

@@ -24,7 +24,7 @@ pub type Pixel = [u8; 4];
 use std::simd::{LaneCount, Mask, Simd, SupportedLaneCount};
 
 use obj::Index;
-use vec::{Vec, Vec2i, Vec3, Vec4};
+use vec::{Vec, Vec3, Vec4};
 
 pub fn triangles_iter<'a, V>(
     vert: &'a [V],
@@ -40,39 +40,31 @@ pub fn clear_color(pixels: buf::PixelBuf, color: u32) {
     }
 }
 
-// #[derive(Clone, Copy)]
-// pub struct Vert {
-//     pub position: Vec4,
-//     pub normal: Vec3,
-//     pub texture: Vec2,
-// }
-
 pub struct SimdAttr<const LANES: usize>
 where
     std::simd::LaneCount<LANES>: std::simd::SupportedLaneCount,
 {
     pub normal: Vec<Simd<f32, LANES>, 3>,
-    pub uv: Vec<Simd<i32, LANES>, 2>,
+    pub uv: Vec<Simd<f32, LANES>, 2>,
 }
 
 #[derive(Clone, Copy)]
 pub struct VertBuf<'a> {
     pub positions: &'a [Vec4],
     pub normals: &'a [Vec3],
-    pub uvs: &'a [Vec2i],
+    pub uvs: &'a [Vec<f32, 2>],
 }
 
 #[derive(Clone, Copy)]
 pub struct Vertex {
     pub position: Vec4,
     pub normal: Vec3,
-    pub uv: Vec2i,
+    pub uv: Vec<f32, 2>,
 }
 
 #[derive(Clone, Copy)]
 pub struct Triangle {
     pub vertices: [Vertex; 3],
-    pub area: i32,
 }
 
 impl<'a> VertexBuf<4> for VertBuf<'a> {
@@ -90,7 +82,7 @@ impl<'a> VertexBuf<4> for VertBuf<'a> {
         v0: Self::Index,
         v1: Self::Index,
         v2: Self::Index,
-        area: i32,
+        _area: i32,
     ) -> Self::Triangle {
         Triangle {
             vertices: [
@@ -110,7 +102,6 @@ impl<'a> VertexBuf<4> for VertBuf<'a> {
                     uv: self.uvs[v2.uv as usize],
                 },
             ],
-            area,
         }
     }
 
@@ -122,7 +113,7 @@ impl<'a> VertexBuf<4> for VertBuf<'a> {
     #[inline(always)]
     fn interpolate_simd_specialized(
         &self,
-        wi: Vec<Simd<i32, 4>, 3>,
+        _wi: Vec<Simd<i32, 4>, 3>,
         w: Vec<Simd<f32, 4>, 3>,
         tri: &Self::Triangle,
     ) -> Self::SimdAttr {
@@ -144,7 +135,7 @@ impl<'a> VertexBuf<4> for VertBuf<'a> {
 
         SimdAttr {
             normal: w.x * n0 + w.y * n1 + w.z * n2,
-            uv: (wi.x * uv0 + wi.y * uv1 + wi.z * uv2) / Simd::splat(tri.area),
+            uv: w.x * uv0 + w.y * uv1 + w.z * uv2,
         }
     }
 }
