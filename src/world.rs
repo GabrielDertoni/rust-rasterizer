@@ -12,8 +12,7 @@ use crate::{
 pub struct World {
     obj: Obj,
     depth_buf: Vec<f32>,
-    camera_pos: Vec3,
-    look_at: Vec3,
+    camera: Camera,
     last_render_times: [Duration; 10],
     theta: f32,
     scale: f32,
@@ -35,10 +34,12 @@ impl World {
         World {
             obj,
             depth_buf: vec![0.0; (width * height) as usize],
-            // camera_pos: Vec3::from([0.0, 1.0, -10.0]),
-            camera_pos: Vec3::from([0.0, 0.0, -10.0]),
-            // look_at: Vec3::from([0.0, 1.0, 0.0]),
-            look_at: Vec3::from([0.0, 0.0, 0.0]),
+            // camera: Camera::from_blender(Vec3::from([0., -10., 4.]), Vec3::from([70., 0., 0.])),
+            camera: Camera {
+                position: Vec3::from([0., 0., -10.]),
+                target: Vec3::zero(),
+                up: Vec3::from([0., 1., 1.]),
+            },
             last_render_times: [Duration::ZERO; 10],
             // theta: -std::f32::consts::FRAC_PI_2,
             theta: 0.0,
@@ -74,19 +75,16 @@ impl World {
             *d = f32::MIN;
         }
 
-        let inc = self.axis * dt.as_secs_f32();
+        let inc = 5. * self.axis * dt.as_secs_f32();
 
-        self.camera_pos -= inc;
-        // self.scale += inc.z * 2.0;
-        // self.camera_pos.x -= inc.x;
-        // self.camera_pos.y -= inc.y;
-        self.look_at.x -= inc.x;
-        self.look_at.y -= inc.y;
+        self.camera.position += inc;
+        self.camera.target   += inc;
 
         let model = Mat4x4::rotation_y(self.theta)
             * Mat4x4::rotation_x(self.theta)
             * Vec3::repeat(1.0 / self.scale).to_scale();
-        let view = Mat4x4::look_at(self.camera_pos, self.look_at, Vec3::from([0.0, 1.0, 0.0]));
+
+        let view = self.camera.view_matrix();
 
         let ratio = self.width as f32 / self.height as f32;
         let proj = Mat4x4::perspective(ratio, 90.0, 1.0, 100.0);
@@ -175,5 +173,27 @@ impl World {
     pub fn update_cursor(&mut self, x: f32, y: f32) {
         self.cursor.x = x;
         self.cursor.y = y;
+    }
+}
+
+pub struct Camera {
+    pub position: Vec3,
+    pub target: Vec3,
+    pub up: Vec3,
+}
+
+impl Camera {
+    pub fn from_blender(position: Vec3, rotation_deg: Vec3) -> Self {
+        let up = Vec3::from([0., 0., 1.]);
+        let rotation = rotation_deg.map(|el| el.to_radians());
+        Camera {
+            position,
+            target: (rotation.to_rotation() * (position - up).to_hom()).xyz(),
+            up,
+        }
+    }
+
+    pub fn view_matrix(&self) -> Mat4x4 {
+        Mat4x4::look_at(self.position, self.target, self.up)
     }
 }
