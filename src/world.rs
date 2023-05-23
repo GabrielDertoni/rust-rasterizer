@@ -5,7 +5,7 @@ use crate::{
     frag_shaders::*,
     obj::Obj,
     prim3d,
-    vec::{Mat4x4, Vec3},
+    vec::{Mat4x4, Vec2, Vec3},
     VertBuf,
 };
 
@@ -21,6 +21,7 @@ pub struct World {
     use_filter: bool,
     pub axis: Vec3,
     pub enable_logging: bool,
+    cursor: Vec2,
     width: u32,
     height: u32,
 }
@@ -34,15 +35,19 @@ impl World {
         World {
             obj,
             depth_buf: vec![0.0; (width * height) as usize],
-            camera_pos: Vec3::from([0.0, 1.0, -1.0]),
-            look_at: Vec3::from([0.0, 1.0, 0.0]),
+            // camera_pos: Vec3::from([0.0, 1.0, -10.0]),
+            camera_pos: Vec3::from([0.0, 0.0, -10.0]),
+            // look_at: Vec3::from([0.0, 1.0, 0.0]),
+            look_at: Vec3::from([0.0, 0.0, 0.0]),
             last_render_times: [Duration::ZERO; 10],
-            theta: -std::f32::consts::FRAC_PI_2,
-            scale: 15.0,
+            // theta: -std::f32::consts::FRAC_PI_2,
+            theta: 0.0,
+            scale: 1.0,
             is_paused: true,
             use_filter: false,
             axis: Vec3::zero(),
             enable_logging: true,
+            cursor: Vec2::zero(),
             width,
             height,
         }
@@ -71,36 +76,29 @@ impl World {
 
         let inc = self.axis * dt.as_secs_f32();
 
-        self.scale += inc.z * 2.0;
-        self.camera_pos.x -= inc.x;
-        self.camera_pos.y -= inc.y;
+        self.camera_pos -= inc;
+        // self.scale += inc.z * 2.0;
+        // self.camera_pos.x -= inc.x;
+        // self.camera_pos.y -= inc.y;
         self.look_at.x -= inc.x;
         self.look_at.y -= inc.y;
 
-        let model = Mat4x4::rotation_x(self.theta) * Vec3::repeat(1.0 / self.scale).to_scale();
+        let model = Mat4x4::rotation_y(self.theta)
+            * Mat4x4::rotation_x(self.theta)
+            * Vec3::repeat(1.0 / self.scale).to_scale();
+        let view = Mat4x4::look_at(self.camera_pos, self.look_at, Vec3::from([0.0, 1.0, 0.0]));
 
-        let eye = self.camera_pos;
-        let up = Vec3::from([0.0, 1.0, 0.0]);
+        let ratio = self.width as f32 / self.height as f32;
+        let proj = Mat4x4::perspective(ratio, 90.0, 1.0, 100.0);
+        let transform = proj * view * model;
 
-        let look = (self.look_at - eye).normalized();
-        let right = up.cross(look).normalized();
-        let up = right.cross(look).normalized();
-
-        let view = Mat4x4::from([
-            [right.x, right.y, right.z, -right.dot(eye)],
-            [up.x, up.y, up.z, -up.dot(eye)],
-            [look.x, look.y, look.z, -look.dot(eye)],
-            [0.0, 0.0, 0.0, 1.0],
-        ]);
-
-        let transform = pixels.ndc_to_screen() * view * model;
-
-        let positions: Vec<_> = self.obj.verts.iter().map(|&p| transform * p).collect();
-
-        self.obj.tris.sort_by_key(|idxs| {
-            let pos = positions[idxs[0].position as usize];
-            (pos.y * pixels.width as f32 + pos.x) as i32
-        });
+        let positions: Vec<_> = self.obj.verts.iter()
+            .map(|&p| {
+                let persp = transform * p;
+                let proj = persp / persp.w;
+                pixels.ndc_to_screen() * proj
+            })
+            .collect();
 
         let vert_buf = VertBuf {
             positions: &positions,
@@ -108,7 +106,11 @@ impl World {
             uvs: &self.obj.uvs,
         };
 
-        let light_dir = Vec3::from([-0.5, 0.5, 0.0]).normalized();
+        let cursor = Vec3::from([self.cursor.x, 1.0 - self.cursor.y, 0.0]);
+        let mut light_dir = cursor - Vec3::from([0.5, 0.5, 0.0]);
+        if light_dir.mag_sq() != 0.0 {
+            light_dir.normalize();
+        }
 
         let draw_timer = Instant::now();
 
@@ -138,8 +140,8 @@ impl World {
                 );
             }
         } else {
-            // let shader = ShowNormalsFragShader::new();
-            let shader = FakeLitFragShader::new(light_dir, model);
+            let shader = ShowNormalsFragShader::new();
+            // let shader = FakeLitFragShader::new(light_dir, model);
 
             prim3d::draw_triangles_opt(
                 &vert_buf,
@@ -168,5 +170,10 @@ impl World {
 
     pub fn toggle_use_filter(&mut self) {
         self.use_filter = !self.use_filter;
+    }
+
+    pub fn update_cursor(&mut self, x: f32, y: f32) {
+        self.cursor.x = x;
+        self.cursor.y = y;
     }
 }

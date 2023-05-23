@@ -194,7 +194,7 @@ impl FakeLitFragShader {
     pub fn new(light_dir: Vec3, model: Mat4x4) -> Self {
         FakeLitFragShader {
             light_dir,
-            local_to_global: model.inverse(),
+            local_to_global: model.inverse().transpose(),
         }
     }
 }
@@ -241,7 +241,39 @@ impl FragShader for ShowNormalsFragShader {
     where
         LaneCount<LANES>: SupportedLaneCount,
     {
-        let n = attrs.normal;
+        use std::simd::SimdFloat;
+
+        let n = attrs.normal.map(|el| el.abs());
         Vec::from([n.x, n.y, n.z, Simd::splat(1.0)])
+    }
+}
+
+pub struct ShowGlobalNormalsFragShader {
+    local_to_global: Mat4x4,
+}
+
+impl ShowGlobalNormalsFragShader {
+    pub fn new(model: Mat4x4) -> Self {
+        ShowGlobalNormalsFragShader {
+            local_to_global: model.inverse().transpose(),
+        }
+    }
+}
+
+impl FragShader for ShowGlobalNormalsFragShader {
+    type SimdAttr<const LANES: usize> = SimdAttr<LANES>
+    where
+        LaneCount<LANES>: SupportedLaneCount;
+
+    fn exec<const LANES: usize>(
+        &self,
+        _mask: Mask<i32, LANES>,
+        attrs: SimdAttr<LANES>,
+    ) -> Vec<Simd<f32, LANES>, 4>
+    where
+        LaneCount<LANES>: SupportedLaneCount,
+    {
+        let result = self.local_to_global.splat() * attrs.normal.to_hom();
+        Vec::from([result.x, result.y, result.z, Simd::splat(1.0)])
     }
 }

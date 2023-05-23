@@ -234,6 +234,50 @@ impl<T: Float> Mat<T, 4, 4> {
             inv3.element_mul(sign_b).to_array(),
         ])
     }
+
+    /// Constructs a view matrix from the camera position, target and up direction.
+    /// The resulting coordinate system has the z direction coming out of the screen and is positive (right hand).
+    #[rustfmt::skip]
+    pub fn look_at(camera_pos: Vec<T, 3>, target: Vec<T, 3>, up: Vec<T, 3>) -> Self {
+        let zaxis = (camera_pos - target).normalized();
+        let right = up.cross(zaxis).normalized();
+        let up = zaxis.cross(right).normalized();
+        let zero = T::zero();
+        let one = T::one();
+        Self::from([
+            [right.x, right.y, right.z, -right.dot(camera_pos)],
+            [   up.x,    up.y,    up.z,    -up.dot(camera_pos)],
+            [zaxis.x, zaxis.y, zaxis.z, -zaxis.dot(camera_pos)],
+            [   zero,    zero,    zero,                    one],
+        ])
+    }
+
+    /// Returns a perspective projection matrix that transforms points within the frustum to the unit volume.
+    /// In particular, in the resulting volume, the `near` clipping plane is mapped to `-1` and the `far`
+    /// clipping plane is mapped to `1`. Thus GREATER depth values means an object is CLOSER to the camera.
+    // source: https://www.scratchapixel.com/lessons/3d-basic-rendering/perspective-and-orthographic-projection-matrix/opengl-perspective-projection-matrix.html
+    #[rustfmt::skip]
+    pub fn perspective(aspect_ratio: T, fovy_deg: T, near: T, far: T) -> Self {
+        let zero = T::zero();
+        let one = T::one();
+        // TODO: this can be done better
+        let two = one + one;
+
+        let t = (fovy_deg.to_radians() / two).tan() * near;
+        let b = -t;
+        let r = t * aspect_ratio;
+        let l = -r;
+
+        let f = far;
+        let n = near;
+
+        Self::from([
+            [two*n/(r-l),        zero,  (r+l)/(r-l),           zero],
+            [       zero, two*n/(t-b),  (t+b)/(t-b),           zero],
+            [       zero,        zero, -(f+n)/(f-n), -two*f*n/(f-n)],
+            [       zero,        zero,          one,           zero],
+        ])
+    }
 }
 
 impl<T, const M: usize, const N: usize> From<[[T; N]; M]> for Mat<T, M, N> {
@@ -839,7 +883,9 @@ pub trait Float: Num {
     fn sqrt(self) -> Self;
     fn sin(self) -> Self;
     fn cos(self) -> Self;
+    fn tan(self) -> Self;
     fn acos(self) -> Self;
+    fn to_radians(self) -> Self;
 }
 
 macro_rules! impl_num_float {
@@ -877,7 +923,13 @@ macro_rules! impl_num_float {
             fn cos(self)  -> $ty { self.cos()  }
 
             #[inline(always)]
+            fn tan(self)  -> $ty { self.tan()  }
+
+            #[inline(always)]
             fn acos(self) -> $ty { self.acos() }
+
+            #[inline(always)]
+            fn to_radians(self) -> $ty { self.to_radians() }
         }
     };
 }
@@ -1012,11 +1064,22 @@ macro_rules! impl_num_float_simd {
                 self
             }
 
+            fn tan(mut self) -> Self {
+                for el in self.as_mut_array() {
+                    *el = el.tan();
+                }
+                self
+            }
+
             fn acos(mut self) -> Self {
                 for el in self.as_mut_array() {
                     *el = el.acos();
                 }
                 self
+            }
+
+            fn to_radians(self) -> Self {
+                SimdFloat::to_radians(self)
             }
         }
     };

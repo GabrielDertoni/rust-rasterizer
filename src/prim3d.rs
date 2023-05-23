@@ -269,8 +269,6 @@ pub fn draw_triangles_opt<V, S>(
     let depth_buf = depth_buf.as_slice_mut();
 
     for &[v0, v1, v2] in tris {
-        let (v0, v1, v2) = (v2, v1, v0);
-
         let p0 = vert.position(v0);
         let p1 = vert.position(v1);
         let p2 = vert.position(v2);
@@ -281,6 +279,7 @@ pub fn draw_triangles_opt<V, S>(
 
         let mut min = p0i.min(p1i).min(p2i);
         min.x = min.x.next_multiple_of(-(LANES as i32)).max(0);
+        min.y = min.y.max(0);
         let max = p0i
             .max(p1i)
             .max(p2i)
@@ -323,13 +322,117 @@ pub fn draw_triangles_opt<V, S>(
                         w.x * Simd::splat(p0.z) + w.y * Simd::splat(p1.z) + w.z * Simd::splat(p2.z);
                     let prev_depth =
                         unsafe { *depth_buf.as_ptr().add(idx).cast::<Simd<f32, LANES>>() };
-                    let mask = mask & (z.simd_gt(prev_depth));
+                    let mask = mask & z.simd_gt(prev_depth);
                     let interp = vert.interpolate_simd_specialized(wi, w, &tri);
                     let simd_pixels = unsafe {
                         &mut *(&mut pixels[idx] as *mut [u8; 4]).cast::<Simd<u32, LANES>>()
                     };
                     frag_shader.exec_specialized(mask, interp, simd_pixels);
 
+                    let new_depth = mask.select(z, prev_depth);
+                    unsafe {
+                        let ptr = &mut depth_buf[idx] as *mut f32;
+                        *ptr.cast::<Simd<f32, LANES>>() = new_depth;
+                    }
+                }
+                w0 += w0_inc.x;
+                w1 += w1_inc.x;
+                w2 += w2_inc.x;
+
+                idx += STEP_X as usize;
+            }
+            w0_row += w0_inc.y;
+            w1_row += w1_inc.y;
+            w2_row += w2_inc.y;
+
+            row_start += stride * STEP_Y as usize;
+        }
+    }
+}
+
+pub fn draw_triangles_depth_only<V>(
+    vert: &V,
+    tris: &[[V::Index; 3]],
+    depth_buf: MatrixSliceMut<f32>,
+) where
+    V: VertexBuf<4>,
+{
+    use std::simd::SimdPartialOrd;
+
+    const STEP_X: i32 = 4;
+    const STEP_Y: i32 = 1;
+
+    #[inline(always)]
+    fn orient_2d_step(
+        from: Vec2i,
+        to: Vec2i,
+        p: Vec2i,
+    ) -> (Vec<Simd<i32, LANES>, 2>, Simd<i32, LANES>) {
+        let u = to - from;
+        let c = u.y * from.x - u.x * from.y;
+        let p = p.splat() + IVec2xX::from([Simd::from([0, 1, 2, 3]), Simd::from([0, 0, 0, 0])]);
+        let w = Simd::splat(u.x) * p.y - Simd::splat(u.y) * p.x + Simd::splat(c);
+        let inc = Vec2i::from([-u.y * STEP_X, u.x * STEP_Y]).splat();
+        (inc, w)
+    }
+
+    let stride = depth_buf.stride;
+    let width = depth_buf.width as i32;
+    let height = depth_buf.height as i32;
+    let depth_buf = depth_buf.as_slice_mut();
+
+    for &[v0, v1, v2] in tris {
+        let p0 = vert.position(v0);
+        let p1 = vert.position(v1);
+        let p2 = vert.position(v2);
+
+        let p0i = p0.xy().to_i32();
+        let p1i = p1.xy().to_i32();
+        let p2i = p2.xy().to_i32();
+
+        let mut min = p0i.min(p1i).min(p2i);
+        min.x = min.x.next_multiple_of(-(LANES as i32)).max(0);
+        min.y = min.y.max(0);
+        let max = p0i
+            .max(p1i)
+            .max(p2i)
+            .min(Vec2i::from([width - STEP_X, height - STEP_Y]));
+
+        // 2 times the area of the triangle
+        let tri_area = orient_2d_i32(p0i, p1i, p2i);
+
+        let nz = {
+            let u = p0 - p1;
+            let v = p2 - p1;
+            u.x * v.y - u.y * v.x
+        };
+
+        if tri_area <= 0 || nz >= 0.0 {
+            continue;
+        }
+
+        let (w0_inc, mut w0_row) = orient_2d_step(p1i, p2i, min);
+        let (w1_inc, mut w1_row) = orient_2d_step(p2i, p0i, min);
+        let (w2_inc, mut w2_row) = orient_2d_step(p0i, p1i, min);
+
+        let inv_area = Simd::splat(1.0 / tri_area as f32);
+
+        let mut row_start = min.y as usize * stride + min.x as usize;
+        for _y in (min.y..=max.y).step_by(STEP_Y as usize) {
+            let mut w0 = w0_row;
+            let mut w1 = w1_row;
+            let mut w2 = w2_row;
+            let mut idx = row_start;
+            for _x in (min.x..=max.x).step_by(STEP_X as usize) {
+                let mask = (w0 | w1 | w2).simd_ge(Simd::splat(0));
+                if mask.any() {
+                    let w = Vec3xX::from([w0.cast::<f32>(), w1.cast::<f32>(), w2.cast::<f32>()])
+                        * inv_area;
+                    let z =
+                        w.x * Simd::splat(p0.z) + w.y * Simd::splat(p1.z) + w.z * Simd::splat(p2.z);
+                    let prev_depth =
+                        unsafe { *depth_buf.as_ptr().add(idx).cast::<Simd<f32, LANES>>() };
+                    let mask = mask & z.simd_gt(prev_depth);
                     let new_depth = mask.select(z, prev_depth);
                     unsafe {
                         let ptr = &mut depth_buf[idx] as *mut f32;

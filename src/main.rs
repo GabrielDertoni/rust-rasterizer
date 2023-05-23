@@ -27,9 +27,9 @@ fn main() {
         .build(&event_loop)
         .unwrap();
 
+    let wsize = window.inner_size();
     let mut pixels = {
-        let size = window.inner_size();
-        let surface_texture = SurfaceTexture::new(size.width, size.height, &window);
+        let surface_texture = SurfaceTexture::new(wsize.width, wsize.height, &window);
         Pixels::new(WIDTH, HEIGHT, surface_texture).unwrap()
     };
 
@@ -85,6 +85,18 @@ fn main() {
                 window.request_redraw()
             }
             Event::RedrawRequested(_) => pixels.render().unwrap(),
+            Event::WindowEvent {
+                event:
+                    WindowEvent::CursorMoved {
+                        position,
+                        ..
+                    },
+                ..
+            } => {
+                let cx = position.x as f32 / wsize.width as f32;
+                let cy = position.y as f32 / wsize.height as f32;
+                world.update_cursor(cx, cy);
+            }
             _ => (),
         }
     });

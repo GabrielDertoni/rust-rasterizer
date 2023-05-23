@@ -43,26 +43,28 @@ impl Obj {
         let mut uvs = Vec::new();
         let mut tris = Vec::new();
         let mut materials = Vec::new();
-        for line in obj.lines() {
+        for (linenum, line) in obj.lines().enumerate() {
             let mut it = line.split_ascii_whitespace();
             match it.next() {
                 Some("v") => {
                     let vec: Vec3 = parse_vertex_coords(it)
-                        .with_context(|| "failed to parse position vertex")?;
+                        .with_context(|| format!("failed to parse position vertex {linenum}:{path:?}"))?;
                     verts.push(Vec4::from([vec.x, vec.y, vec.z, 1.0]))
                 },
                 Some("vn") => normals.push({
                     parse_vertex_coords(it)
-                        .with_context(|| "failed to parse normal vertex")?
+                        .with_context(|| format!("failed to parse normal vertex {linenum}:{path:?}"))?
                 }),
                 Some("vt") => uvs.push({
                     let vec: Vec3 = parse_vertex_coords(it)
-                        .with_context(|| "failed to parse uv vertex")?;
+                        .with_context(|| format!("failed to parse uv vertex at {linenum}:{path:?}"))?;
                     vec.xy()
                 }),
-                Some("f") => parse_face_idxs(it, &mut tris)?,
+                Some("f") => parse_face_idxs(it, &mut tris)
+                    .with_context(|| format!("failed to parse face indices at {linenum}:{path:?}"))?,
                 Some("mtllib") => {
-                    let fname = it.next().ok_or_else(|| anyhow!("expected .mtl file name"))?;
+                    let fname = it.next()
+                        .ok_or_else(|| anyhow!("expected .mtl file name at {linenum}:{path:?}"))?;
                     Material::load_lib(root.join(fname).as_ref(), &mut materials)?;
                 }
                 Some("#") => continue,
@@ -160,16 +162,20 @@ fn parse_face_idxs<'a>(it: impl Iterator<Item = &'a str>, v: &mut Vec<[Index; 3]
         it.map(|el| {
             let idxs = el.split('/')
                 .map(|idx| {
-                    idx.parse::<u32>()
-                        .map(|i| i - 1) // Convert to 0-based indexing
-                        .map_err(Into::into)
+                    if idx.is_empty() {
+                        Ok(None)
+                    } else {
+                        let idx = idx.parse::<u32>().map(|i| i - 1)?; // Convert to 0-based indexing
+                        Ok(Some(idx))
+                    }
                 })
                 .collect::<Result<Vec<_>>>()?;
-            let idxs = match idxs.len() {
-                1 => Index { position: idxs[0], uv: 0      , normal: 0       },
-                2 => Index { position: idxs[0], uv: idxs[1], normal: 0       },
-                3 => Index { position: idxs[0], uv: idxs[1], normal: idxs[2] },
-                n => return Err(anyhow!("invalid number of face indices {n}")),
+            let idxs = match &idxs[..] {
+                &[Some(position)] => Index { position, uv: 0      , normal: 0       },
+                &[Some(position), Some(uv)] => Index { position, uv, normal: 0       },
+                &[Some(position), Some(uv), Some(normal)] => Index { position, uv, normal },
+                &[Some(position), None, Some(normal)] => Index { position, uv: 0, normal },
+                arr => return Err(anyhow!("invalid number of face indices {}", arr.iter().filter(|el| el.is_some()).count())),
             };
             Ok(idxs)
         })
