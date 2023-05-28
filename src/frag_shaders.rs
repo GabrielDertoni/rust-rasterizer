@@ -1,20 +1,21 @@
 use crate::{
-    vec::{Mat, Mat4x4, Vec, Vec3},
-    FragShader, SimdAttr,
+    buf,
+    vec::{Mat4x4, Vec, Vec2i, Vec3},
+    FragmentShader, SimdAttrs,
 };
 
-use std::simd::{LaneCount, Mask, Simd, SupportedLaneCount};
+use std::simd::{
+    LaneCount, Mask, Simd, SimdFloat, SimdPartialEq, SimdPartialOrd, SupportedLaneCount,
+};
 
 pub struct TextureMappingFragShader<'a> {
-    light_dir: Vec<Simd<f32, 4>, 3>,
-    local_to_global: Mat<Simd<f32, 4>, 4, 4>,
     texture_width: i32,
     texture_height: i32,
     texture: &'a [u32],
 }
 
 impl<'a> TextureMappingFragShader<'a> {
-    pub fn new(light_dir: Vec3, model: Mat4x4, texture_img: &'a image::RgbaImage) -> Self {
+    pub fn new(texture_img: &'a image::RgbaImage) -> Self {
         let texture_width = texture_img.width();
         let texture_height = texture_img.height();
         let texture: &[u8] = &*texture_img;
@@ -23,8 +24,6 @@ impl<'a> TextureMappingFragShader<'a> {
         // SAFETY: Pointer is aligned
         let texture = unsafe { std::slice::from_raw_parts(ptr, texture.len() / 4) };
         TextureMappingFragShader {
-            light_dir: light_dir.splat(),
-            local_to_global: model.inverse().splat(),
             texture_width: texture_width as i32,
             texture_height: texture_height as i32,
             texture,
@@ -32,8 +31,8 @@ impl<'a> TextureMappingFragShader<'a> {
     }
 }
 
-impl<'a> FragShader for TextureMappingFragShader<'a> {
-    type SimdAttr<const LANES: usize> = SimdAttr<LANES>
+impl<'a> FragmentShader for TextureMappingFragShader<'a> {
+    type SimdAttr<const LANES: usize> = SimdAttrs<LANES>
     where
         LaneCount<LANES>: SupportedLaneCount;
 
@@ -41,7 +40,7 @@ impl<'a> FragShader for TextureMappingFragShader<'a> {
     fn exec<const LANES: usize>(
         &self,
         _mask: Mask<i32, LANES>,
-        _attrs: SimdAttr<LANES>,
+        _attrs: SimdAttrs<LANES>,
     ) -> Vec<Simd<f32, LANES>, 4>
     where
         LaneCount<LANES>: SupportedLaneCount,
@@ -54,12 +53,9 @@ impl<'a> FragShader for TextureMappingFragShader<'a> {
         &self,
         mask: Mask<i32, 4>,
         attrs: Self::SimdAttr<4>,
+        _pixel_coords: Vec<Simd<i32, 4>, 2>,
         pixels: &mut Simd<u32, 4>,
     ) {
-        // let light = (self.local_to_global * attrs.normal.to_hom())
-        //     .xyz()
-        //     .dot(self.light_dir);
-
         let [u, v] = attrs.uv.to_array();
         let x = (u * Simd::splat(self.texture_width as f32)).cast::<i32>();
         let y = ((Simd::splat(1.0) - v) * Simd::splat(self.texture_height as f32)).cast::<i32>();
@@ -68,17 +64,6 @@ impl<'a> FragShader for TextureMappingFragShader<'a> {
         unsafe {
             *pixels = Simd::gather_select_unchecked(&self.texture, mask.cast(), idx, *pixels);
         }
-        /*
-        let texture_color = Vec::from({
-            let arr = Simd::gather_or_default(&self.texture, idx).to_array();
-            crate::unroll_array!(i = 0, 1, 2, 3 => Simd::from(arr[i].to_ne_bytes()))
-        })
-        .simd_transpose_4()
-        .map_4(|el| el.cast::<f32>() * Simd::splat(1.0 / 255.0));
-
-        let lit_color = texture_color.xyz() * light.clamp(Simd::splat(0.2), Simd::splat(1.0));
-        Vec::from([lit_color.x, lit_color.y, lit_color.z, texture_color.w])
-        */
     }
 }
 
@@ -199,15 +184,15 @@ impl FakeLitFragShader {
     }
 }
 
-impl FragShader for FakeLitFragShader {
-    type SimdAttr<const LANES: usize> = SimdAttr<LANES>
+impl FragmentShader for FakeLitFragShader {
+    type SimdAttr<const LANES: usize> = SimdAttrs<LANES>
     where
         LaneCount<LANES>: SupportedLaneCount;
 
     fn exec<const LANES: usize>(
         &self,
         _mask: Mask<i32, LANES>,
-        attrs: SimdAttr<LANES>,
+        attrs: SimdAttrs<LANES>,
     ) -> Vec<Simd<f32, LANES>, 4>
     where
         LaneCount<LANES>: SupportedLaneCount,
@@ -220,6 +205,91 @@ impl FragShader for FakeLitFragShader {
     }
 }
 
+pub struct LitFragShader<'a> {
+    normal_local_to_world: Mat4x4,
+    light_pos: Vec3,
+    light_transform: Mat4x4,
+    light_color: Vec3,
+    shadow_map: buf::MatrixSlice<'a, f32>,
+}
+
+impl<'a> LitFragShader<'a> {
+    pub fn new(
+        model: Mat4x4,
+        light_pos: Vec3,
+        light_transform: Mat4x4,
+        light_color: Vec3,
+        shadow_map: buf::MatrixSlice<'a, f32>,
+    ) -> Self {
+        LitFragShader {
+            normal_local_to_world: model.inverse().transpose(),
+            light_pos,
+            light_transform,
+            light_color,
+            shadow_map,
+        }
+    }
+}
+
+impl<'a> FragmentShader for LitFragShader<'a> {
+    type SimdAttr<const LANES: usize> = SimdAttrs<LANES>
+    where
+        LaneCount<LANES>: SupportedLaneCount;
+
+    fn exec<const LANES: usize>(
+        &self,
+        _mask: Mask<i32, LANES>,
+        _attrs: SimdAttrs<LANES>,
+    ) -> Vec<Simd<f32, LANES>, 4>
+    where
+        LaneCount<LANES>: SupportedLaneCount,
+    {
+        panic!("unsupported")
+    }
+
+    // source: https://learnopengl.com/Advanced-Lighting/Shadows/Shadow-Mapping
+    fn exec_specialized(
+        &self,
+        mask: Mask<i32, 4>,
+        attrs: Self::SimdAttr<4>,
+        _pixel_coords: Vec<Simd<i32, 4>, 2>,
+        pixels: &mut Simd<u32, 4>,
+    ) {
+        let shadow_uv = self.light_transform.splat() * attrs.position;
+        let shadow_pos = self.shadow_map.ndc_to_screen().splat() * (shadow_uv / shadow_uv.w);
+
+        let idx = shadow_pos.y.cast::<i32>() * Simd::splat(self.shadow_map.stride as i32)
+            + shadow_pos.x.cast::<i32>();
+        let shadow_map = self.shadow_map.as_slice();
+
+        let values = Simd::gather_or(shadow_map, idx.cast(), Simd::splat(1.0)) + Simd::splat(0.001);
+        let lit_mask = shadow_pos.z.simd_le(values);
+
+        let ambient = self.light_color * 0.15;
+
+        let normal = self.normal_local_to_world.splat() * attrs.normal.to_hom();
+        let light_dir = (self.light_pos.splat() - attrs.position.xyz()).normalized();
+        let diffuse_intensity = light_dir.dot(normal.xyz()).simd_max(Simd::splat(0.));
+        let diffuse = diffuse_intensity * self.light_color.splat();
+
+        // TODO
+        let specular = Vec3::zero().splat();
+
+        let lighting = ambient.splat()
+            + (diffuse + specular).map_3(|el| lit_mask.select(el, Simd::splat(0.0)));
+
+        let color = lighting.map_3(|el| (el * Simd::splat(128.)).cast::<u8>());
+
+        // Add alpha channel and traspose. Here `color.x` is the red values of each of the pixels.
+        // Thus, this is in SoA form, but we need it in AoS form in order to write to `pixels`.
+        let colors = Vec::from([color.x, color.y, color.z, Simd::splat(0xff)])
+            .simd_transpose_4()
+            .map_4(|el| u32::from_ne_bytes(el.to_array()));
+
+        *pixels = mask.select(Simd::from(colors.to_array()), *pixels);
+    }
+}
+
 pub struct ShowNormalsFragShader;
 
 impl ShowNormalsFragShader {
@@ -228,15 +298,15 @@ impl ShowNormalsFragShader {
     }
 }
 
-impl FragShader for ShowNormalsFragShader {
-    type SimdAttr<const LANES: usize> = SimdAttr<LANES>
+impl FragmentShader for ShowNormalsFragShader {
+    type SimdAttr<const LANES: usize> = SimdAttrs<LANES>
     where
         LaneCount<LANES>: SupportedLaneCount;
 
     fn exec<const LANES: usize>(
         &self,
         _mask: Mask<i32, LANES>,
-        attrs: SimdAttr<LANES>,
+        attrs: SimdAttrs<LANES>,
     ) -> Vec<Simd<f32, LANES>, 4>
     where
         LaneCount<LANES>: SupportedLaneCount,
@@ -260,15 +330,15 @@ impl ShowGlobalNormalsFragShader {
     }
 }
 
-impl FragShader for ShowGlobalNormalsFragShader {
-    type SimdAttr<const LANES: usize> = SimdAttr<LANES>
+impl FragmentShader for ShowGlobalNormalsFragShader {
+    type SimdAttr<const LANES: usize> = SimdAttrs<LANES>
     where
         LaneCount<LANES>: SupportedLaneCount;
 
     fn exec<const LANES: usize>(
         &self,
         _mask: Mask<i32, LANES>,
-        attrs: SimdAttr<LANES>,
+        attrs: SimdAttrs<LANES>,
     ) -> Vec<Simd<f32, LANES>, 4>
     where
         LaneCount<LANES>: SupportedLaneCount,

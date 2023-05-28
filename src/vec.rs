@@ -1,3 +1,4 @@
+use std::fmt;
 use std::ops::{
     Add, AddAssign, Div, DivAssign, Index, IndexMut, Mul, MulAssign, Neg, Sub, SubAssign,
 };
@@ -6,7 +7,7 @@ use std::simd::{LaneCount, Simd, SimdElement, SimdFloat, SimdOrd, StdFloat, Supp
 pub type Mat4x4 = Mat<f32, 4, 4>;
 
 #[repr(transparent)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Mat<T, const M: usize, const N: usize>([[T; N]; M]);
 
 impl<T: Copy, const M: usize, const N: usize> Mat<T, M, N> {
@@ -241,9 +242,19 @@ impl<T: Float> Mat<T, 4, 4> {
     pub fn look_at(camera_pos: Vec<T, 3>, target: Vec<T, 3>, up: Vec<T, 3>) -> Self {
         let zaxis = (camera_pos - target).normalized();
         let right = up.cross(zaxis).normalized();
-        let up = zaxis.cross(right).normalized();
+        let up = zaxis.cross(right);
         let zero = T::zero();
         let one = T::one();
+        // Okay, so this one took me a while to understand! The reason this matrix is layed out like this is that
+        // it is that the 3x3 inner matrix is, in fact, the inverse of the change of basis matrix. So, normaly when
+        // you want a change of basis matrix, say you want to transform from basis A to B, now you write B's basis
+        // vectors in basis A. If you layout the columns of the matrix with B's basis vectors written in basis A,
+        // that matrix can now be used to transform vectors written in basis B into basis A. But that's not what we
+        // want! We want to turn from B into A. Well, the we just get the inverse. However, if A and B are both right
+        // handed or both left handed, and they are orthonormal basis, then the transformation is simply a rotation
+        // of some sort. But the inverse of a rotation is just a transpose! So that's why the matrix looks like this!
+        // The translation can be though as separate. If you write the origin of the new coordinate system in the old
+        // one you got a translation from the new to the old, but if you simply reverse the sign, you got the inverse!
         Self::from([
             [right.x, right.y, right.z, -right.dot(camera_pos)],
             [   up.x,    up.y,    up.z,    -up.dot(camera_pos)],
@@ -275,7 +286,7 @@ impl<T: Float> Mat<T, 4, 4> {
             [two*n/(r-l),        zero,  (r+l)/(r-l),           zero],
             [       zero, two*n/(t-b),  (t+b)/(t-b),           zero],
             [       zero,        zero, -(f+n)/(f-n), -two*f*n/(f-n)],
-            [       zero,        zero,          one,           zero],
+            [       zero,        zero,         -one,           zero],
         ])
     }
 }
@@ -283,6 +294,72 @@ impl<T: Float> Mat<T, 4, 4> {
 impl<T, const M: usize, const N: usize> From<[[T; N]; M]> for Mat<T, M, N> {
     fn from(value: [[T; N]; M]) -> Self {
         Mat(value)
+    }
+}
+
+impl<T: fmt::Debug, const M: usize, const N: usize> fmt::Debug for Mat<T, M, N> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fn print_row<T: fmt::Debug, const N: usize>(
+            row: &[T; N],
+            f: &mut fmt::Formatter<'_>,
+        ) -> fmt::Result {
+            write!(f, "[")?;
+            if N > 0 {
+                fmt::Debug::fmt(&row[0], f)?;
+            }
+            for j in 1..N {
+                write!(f, ", ")?;
+                fmt::Debug::fmt(&row[j], f)?;
+            }
+            write!(f, "]")
+        }
+        write!(f, "[")?;
+        print_row(&self.0[0], &mut *f)?;
+        for i in 1..M {
+            writeln!(f, ",")?;
+            write!(f, " ")?;
+            print_row(&self.0[i], &mut *f)?;
+        }
+        write!(f, "]")
+    }
+}
+
+impl<T: fmt::Display, const M: usize, const N: usize> fmt::Display for Mat<T, M, N> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        use fmt::Write;
+
+        fn print_row<T: fmt::Display, const N: usize>(
+            row: &[T; N],
+            f: &mut fmt::Formatter<'_>,
+            width: usize,
+        ) -> fmt::Result {
+            write!(f, "[")?;
+            if N > 0 {
+                write!(f, "{:width$}", &row[0])?;
+            }
+            for j in 1..N {
+                write!(f, ", ")?;
+                write!(f, "{:width$}", &row[j])?;
+            }
+            write!(f, "]")
+        }
+        let mut maxlen = 0;
+        let mut buf = String::new();
+        for i in 0..M {
+            for j in 0..N {
+                buf.clear();
+                write!(&mut buf, "{}", self.0[i][j])?;
+                maxlen = Ord::max(maxlen, buf.len());
+            }
+        }
+        write!(f, "[")?;
+        print_row(&self.0[0], &mut *f, maxlen)?;
+        for i in 1..M {
+            writeln!(f, ",")?;
+            write!(f, " ")?;
+            print_row(&self.0[i], &mut *f, maxlen)?;
+        }
+        write!(f, "]")
     }
 }
 
@@ -387,7 +464,7 @@ impl<T: Num> Vec<T, 3> {
     pub fn cross(self, rhs: Self) -> Self {
         Self::from([
             self.y * rhs.z - self.z * rhs.y,
-            self.x * rhs.z - self.z * rhs.x,
+            self.z * rhs.x - self.x * rhs.z,
             self.x * rhs.y - self.y * rhs.x,
         ])
     }
@@ -571,6 +648,19 @@ impl<T: Num, const M: usize, const N: usize> Mul<T> for Mat<T, M, N> {
             }
         }
         ret
+    }
+}
+
+impl<T: Num, const M: usize, const N: usize> Neg for Mat<T, M, N> {
+    type Output = Self;
+
+    fn neg(mut self) -> Self::Output {
+        for i in 0..M {
+            for j in 0..N {
+                self.0[i][j] = -self.0[i][j];
+            }
+        }
+        self
     }
 }
 

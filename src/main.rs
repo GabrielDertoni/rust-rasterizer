@@ -37,7 +37,6 @@ fn main() {
 
     let mut start = Instant::now();
     event_loop.run(move |event, _, control_flow| {
-        // control_flow.set_wait();
         control_flow.set_poll();
 
         match event {
@@ -59,6 +58,7 @@ fn main() {
                     },
                 ..
             } => match (state, virtual_keycode) {
+                (ElementState::Pressed, VirtualKeyCode::Escape) => control_flow.set_exit(),
                 (ElementState::Pressed, VirtualKeyCode::Space) => world.toggle_pause(),
                 (ElementState::Pressed, VirtualKeyCode::F) => world.toggle_use_filter(),
                 (ElementState::Pressed, VirtualKeyCode::V) => world.axis.z = 1.0,
@@ -82,20 +82,17 @@ fn main() {
                 let dt = start.elapsed();
                 start = Instant::now();
                 world.render(pixels.frame_mut(), dt);
+                // std::thread::sleep(std::time::Duration::from_millis(200));
                 window.request_redraw()
             }
             Event::RedrawRequested(_) => pixels.render().unwrap(),
             Event::WindowEvent {
-                event:
-                    WindowEvent::CursorMoved {
-                        position,
-                        ..
-                    },
+                event: WindowEvent::CursorMoved { position, .. },
                 ..
             } => {
                 let cx = position.x as f32 / wsize.width as f32;
-                let cy = position.y as f32 / wsize.height as f32;
-                world.update_cursor(cx, cy);
+                let cy = 1. - (position.y as f32 / wsize.height as f32);
+                world.update_cursor(2. * cx - 1., 2. * cy - 1.);
             }
             _ => (),
         }
