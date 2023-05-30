@@ -26,14 +26,14 @@ impl VertexShader<Vertex> for LitVertexShader {
     type Output = LitAttributes;
 
     fn exec(&self, vertex: Vertex) -> (Self::Output, Vec4) {
-        let shadow_uv = self.light_transform * vertex.position;
-        let shadow_uv = shadow_uv / shadow_uv.w;
+        let shadow_clip = self.light_transform * vertex.position;
+        let shadow_ndc = shadow_clip / shadow_clip.w;
         (
             LitAttributes {
                 normal: vertex.normal,
                 frag_position: vertex.position,
                 uv: vertex.uv,
-                shadow_uv,
+                shadow_ndc: shadow_ndc.xyz(),
             },
             self.transform * vertex.position,
         )
@@ -44,7 +44,7 @@ pub struct LitAttributes {
     pub normal: Vec3,
     pub frag_position: Vec4,
     pub uv: Vec2,
-    pub shadow_uv: Vec4,
+    pub shadow_ndc: Vec3,
 }
 
 pub struct LitAttributesSimd<const LANES: usize>
@@ -54,7 +54,7 @@ where
     pub normal: Vec3xN<LANES>,
     pub frag_position: Vec4xN<LANES>,
     pub uv: Vec2xN<LANES>,
-    pub shadow_uv: Vec4xN<LANES>,
+    pub shadow_ndc: Vec3xN<LANES>,
 }
 
 impl Attributes for LitAttributes {
@@ -70,7 +70,7 @@ impl Attributes for LitAttributes {
             normal: self.normal.splat(),
             frag_position: self.frag_position.splat(),
             uv: self.uv.splat(),
-            shadow_uv: self.shadow_uv.splat(),
+            shadow_ndc: self.shadow_ndc.splat(),
         }
     }
 
@@ -89,9 +89,9 @@ impl Attributes for LitAttributes {
                 + w.y * p1.frag_position.splat()
                 + w.z * p2.frag_position.splat(),
             uv: w.x * p0.uv.splat() + w.y * p1.uv.splat() + w.z * p2.uv.splat(),
-            shadow_uv: w.x * p0.shadow_uv.splat()
-                + w.y * p1.shadow_uv.splat()
-                + w.z * p2.shadow_uv.splat(),
+            shadow_ndc: w.x * p0.shadow_ndc.splat()
+                + w.y * p1.shadow_ndc.splat()
+                + w.z * p2.shadow_ndc.splat(),
         }
     }
 }
@@ -141,21 +141,16 @@ impl<'a> FragmentShader for LitFragmentShader<'a> {
         LaneCount<LANES>: SupportedLaneCount,
     {
         let normal = (self.normal_local_to_world.splat() * attrs.normal.to_hom()).xyz();
-        let shadow_pos = self.shadow_map.ndc_to_screen().splat() * attrs.shadow_uv;
-        let shadow_pos_i32 = Vec::from([shadow_pos.x.cast::<i32>(), shadow_pos.y.cast::<i32>()]);
-
-        let in_bounds = shadow_pos_i32.x.simd_ge(Simd::splat(0))
-            & shadow_pos_i32.x.simd_le(Simd::splat(self.shadow_map.width as i32))
-            & shadow_pos_i32.y.simd_ge(Simd::splat(0))
-            & shadow_pos_i32.y.simd_le(Simd::splat(self.shadow_map.height as i32));
-        let idx = shadow_pos_i32.y * Simd::splat(self.shadow_map.stride as i32) + shadow_pos_i32.x;
-        let shadow_map = self.shadow_map.as_slice();
 
         let bias_unit = 1. / self.shadow_map.width as f32;
         let bias = 5. * bias_unit;
-        let values =
-            Simd::gather_select(shadow_map, in_bounds.cast(), idx.cast(), Simd::splat(f32::MIN)) + Simd::splat(bias);
-        let lit_mask = shadow_pos.z.simd_le(values);
+
+        let lit_mask = {
+            let shadow_uv = attrs.shadow_ndc.xy() * Simd::splat(0.5) + Vec::from([0.5, 0.5]).splat();
+            let shadow_map = self.shadow_map.channel1();
+            let light_depth = shadow_map.index_uv_or(shadow_uv, Mask::from([true; LANES]), Simd::splat(f32::MIN)).x + Simd::splat(bias);
+            attrs.shadow_ndc.z.simd_le(light_depth)
+        };
 
         let ambient = self.light_color * 0.15;
 
@@ -174,49 +169,14 @@ impl<'a> FragmentShader for LitFragmentShader<'a> {
         };
 
         let specular = specular_intensity * self.light_color.splat();
-
-        let [u, v] = attrs.uv.to_array();
-        let x = (u * Simd::splat(self.texture.width as f32)).cast::<i32>();
-        let y = ((Simd::splat(1.0) - v) * Simd::splat(self.texture.height as f32)).cast::<i32>();
-        let texture_idx = (y * Simd::splat(self.texture.width as i32) + x).cast::<usize>();
-
-        let texture_color = {
-            Vec3xN::from([
-                Simd::from(std::array::from_fn(|lane| {
-                    let idx = texture_idx.as_array()[lane];
-                    if mask.test(lane) {
-                        self.texture.as_slice()[idx][0] as f32 / 255.
-                    } else {
-                        0.
-                    }
-                })),
-                Simd::from(std::array::from_fn(|lane| {
-                    let idx = texture_idx.as_array()[lane];
-                    if mask.test(lane) {
-                        self.texture.as_slice()[idx][1] as f32 / 255.
-                    } else {
-                        0.
-                    }
-                })),
-                Simd::from(std::array::from_fn(|lane| {
-                    let idx = texture_idx.as_array()[lane];
-                    if mask.test(lane) {
-                        self.texture.as_slice()[idx][2] as f32 / 255.
-                    } else {
-                        0.
-                    }
-                })),
-            ])
-        };
+        let texture_color = self.texture.texture_idx(attrs.uv, mask);
 
         let color = (ambient.splat()
-            + (diffuse + specular).map_3(|el| lit_mask.select(el, Simd::splat(0.0)))).element_mul(texture_color);
-        // let color = texture_color;
+            + (diffuse + specular).map_3(|el| lit_mask.select(el, Simd::splat(0.0)))).element_mul(texture_color.xyz());
 
         Vec4xN::from([color.x, color.y, color.z, Simd::splat(1.)])
     }
 }
-
 
 pub struct DebugLightIntensity {
     camera_pos: Vec3,

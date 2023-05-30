@@ -1,7 +1,8 @@
 use std::marker::PhantomData;
 use std::ops::{Bound, Index, IndexMut, RangeBounds};
+use std::simd::{SimdElement, Simd, Mask, LaneCount, SupportedLaneCount, SimdPartialOrd, SimdFloat};
 
-use crate::vec::{Mat4x4, Vec3};
+use crate::vec::{Vec, Mat4x4, Vec2xN, Vec3, Vec4xN};
 use crate::Pixel;
 
 pub type PixelBuf<'a> = MatrixSliceMut<'a, Pixel>;
@@ -46,6 +47,215 @@ impl<'a, E> MatrixSlice<'a, E> {
         Vec3::from([self.width as f32, self.height as f32, 1.0]).to_scale()
             * Vec3::from([0.5, 0.5, 0.0]).to_translation()
             * Vec3::from([0.5, -0.5, 1.0]).to_scale()
+    }
+
+    pub fn channel1(&self) -> MatrixSlice<'a, [E; 1]> {
+        unsafe { std::mem::transmute_copy(self) }
+    }
+}
+
+impl<'a, T, const N: usize> MatrixSlice<'a, [T; N]> {
+    #[inline]
+    pub fn flatten(self) -> MatrixSlice<'a, T> {
+        MatrixSlice {
+            width: self.width * N,
+            height: self.height,
+            stride: self.stride * N,
+            ptr: self.ptr.cast(),
+            _marker: PhantomData,
+        }
+    }
+
+    #[inline]
+    pub fn simd_index_soa<const LANES: usize>(&self, x: Simd<usize, LANES>, y: Simd<usize, LANES>, mask: Mask<isize, LANES>) -> [Simd<T, LANES>; N]
+    where
+        LaneCount<LANES>: SupportedLaneCount,
+        T: SimdElement + Default,
+    {
+        self.simd_index_soa_or(x, y, mask, Simd::splat(Default::default()))
+    }
+
+    #[inline]
+    pub fn simd_index_soa_or<const LANES: usize>(&self, x: Simd<usize, LANES>, y: Simd<usize, LANES>, mask: Mask<isize, LANES>, or: Simd<T, LANES>) -> [Simd<T, LANES>; N]
+    where
+        LaneCount<LANES>: SupportedLaneCount,
+        T: SimdElement,
+    {
+        let inbounds = x.simd_le(Simd::splat(self.width)) & y.simd_le(Simd::splat(self.height));
+        debug_assert!(inbounds.all(), "out of bounds");
+
+        let mask = mask & inbounds;
+
+        let flat: MatrixSlice<T> = self.borrow().flatten();
+        let x = x * Simd::splat(N);
+
+        std::array::from_fn(move |off| unsafe { flat.simd_index_select_or_unchecked(mask, x + Simd::splat(off), y, or) })
+    }
+
+    #[inline]
+    pub unsafe fn simd_index_soa_or_unchecked<const LANES: usize>(
+        &self,
+        x: Simd<usize, LANES>,
+        y: Simd<usize, LANES>,
+        mask: Mask<isize, LANES>,
+        or: Simd<T, LANES>,
+    ) -> [Simd<T, LANES>; N]
+    where
+        LaneCount<LANES>: SupportedLaneCount,
+        T: SimdElement,
+    {
+        let flat: MatrixSlice<T> = self.borrow().flatten();
+        let x = x * Simd::splat(N);
+
+        std::array::from_fn(move |off| unsafe { flat.simd_index_select_or_unchecked(mask, x + Simd::splat(off), y, or) })
+    }
+
+    /// Index the matrix slice with uv coordinates. The access is clamped if the index is out of bounds.
+    #[inline]
+    pub fn index_uv<const LANES: usize>(&self, uv: Vec2xN<LANES>, mask: Mask<i32, LANES>) -> Vec<Simd<T, LANES>, N>
+    where
+        LaneCount<LANES>: SupportedLaneCount,
+        T: SimdElement + Default,
+    {
+        let [u, v] = uv.to_array();
+
+        let u = u.simd_clamp(Simd::splat(0.), Simd::splat(1.));
+        let v = v.simd_clamp(Simd::splat(0.), Simd::splat(1.));
+
+        let x = (u * Simd::splat(self.width as f32)).cast::<usize>();
+        let y = ((Simd::splat(1.) - v) * Simd::splat(self.height as f32)).cast::<usize>();
+
+        Vec::from(self.simd_index_soa(x, y, mask.cast()))
+    }
+
+    /// Index the matrix slice with uv coordinates. The access is repeated if the index is out of bounds.
+    #[inline]
+    pub fn index_uv_repeat<const LANES: usize>(&self, uv: Vec2xN<LANES>, mask: Mask<i32, LANES>) -> Vec<Simd<T, LANES>, N>
+    where
+        LaneCount<LANES>: SupportedLaneCount,
+        T: SimdElement + Default,
+    {
+        let [u, v] = uv.to_array();
+
+        let u = u % Simd::splat(1.);
+        let v = v % Simd::splat(1.);
+
+        // `.to_int()` will return 0 for `false` and `-1` for true
+        let u = u - u.is_sign_negative().to_int().cast();
+        let v = v - v.is_sign_negative().to_int().cast();
+
+        let x = (u * Simd::splat(self.width as f32)).cast::<usize>();
+        let y = ((Simd::splat(1.) - v) * Simd::splat(self.height as f32)).cast::<usize>();
+
+        Vec::from(self.simd_index_soa(x, y, mask.cast()))
+    }
+
+    /// Index the matrix slice with uv coordinates. `or` is returned if the access is out of bounds
+    #[inline]
+    pub fn index_uv_or<const LANES: usize>(&self, uv: Vec2xN<LANES>, mask: Mask<i32, LANES>, or: Simd<T, LANES>) -> Vec<Simd<T, LANES>, N>
+    where
+        LaneCount<LANES>: SupportedLaneCount,
+        T: SimdElement,
+    {
+        let [u, v] = uv.to_array();
+
+        let mask = mask & u.is_sign_positive() & v.is_sign_positive();
+
+        let x = (u * Simd::splat(self.width as f32)).cast::<usize>();
+        let y = ((Simd::splat(1.) - v) * Simd::splat(self.height as f32)).cast::<usize>();
+
+        Vec::from(self.simd_index_soa_or(x, y, mask.cast(), or))
+    }
+}
+
+impl<'a, E> MatrixSlice<'a, E>
+where
+    E: SimdElement,
+{
+    #[inline]
+    pub fn simd_index<const LANES: usize>(&self, x: Simd<usize, LANES>, y: Simd<usize, LANES>) -> Simd<E, LANES>
+    where
+        LaneCount<LANES>: SupportedLaneCount,
+        E: Default,
+    {
+        self.simd_index_or(x, y, Simd::splat(Default::default()))
+    }
+
+    #[inline]
+    pub fn simd_index_or<const LANES: usize>(&self, x: Simd<usize, LANES>, y: Simd<usize, LANES>, or: Simd<E, LANES>) -> Simd<E, LANES>
+    where
+        LaneCount<LANES>: SupportedLaneCount,
+    {
+        let inbounds = x.simd_le(Simd::splat(self.width)) & y.simd_le(Simd::splat(self.height));
+        debug_assert!(inbounds.all(), "out of bounds");
+
+        let idx = y * Simd::splat(self.stride) + x;
+        unsafe { Simd::gather_select_unchecked(self.as_slice(), inbounds, idx, or) }
+    }
+
+    #[inline]
+    pub fn simd_index_select_or<const LANES: usize>(
+        &self,
+        mask: Mask<isize, LANES>,
+        x: Simd<usize, LANES>,
+        y: Simd<usize, LANES>,
+        or: Simd<E, LANES>,
+    ) -> Simd<E, LANES>
+    where
+        LaneCount<LANES>: SupportedLaneCount,
+    {
+        let inbounds = x.simd_le(Simd::splat(self.width)) & y.simd_le(Simd::splat(self.height));
+        debug_assert!(inbounds.all(), "out of bounds");
+        unsafe { self.simd_index_select_or_unchecked(mask & inbounds, x, y, or) }
+    }
+
+    #[inline]
+    pub unsafe fn simd_index_select_or_unchecked<const LANES: usize>(
+        &self,
+        mask: Mask<isize, LANES>,
+        x: Simd<usize, LANES>,
+        y: Simd<usize, LANES>,
+        or: Simd<E, LANES>,
+    ) -> Simd<E, LANES>
+    where
+        LaneCount<LANES>: SupportedLaneCount,
+    {
+        let idx = y * Simd::splat(self.stride) + x;
+        Simd::gather_select_unchecked(self.as_slice(), mask, idx, or)
+    }
+}
+
+type Texture<'a> = MatrixSlice<'a, Pixel>;
+
+impl<'a> Texture<'a> {
+    #[inline]
+    pub fn texture_idx<const LANES: usize>(&self, uv: Vec2xN<LANES>, mask: Mask<i32, LANES>) -> Vec4xN<LANES>
+    where
+        LaneCount<LANES>: SupportedLaneCount,
+    {
+        let mask = mask.cast();
+        let [u, v] = uv.to_array();
+
+        let x = (u * Simd::splat(self.width as f32)).cast::<usize>();
+        let y = ((Simd::splat(1.) - v) * Simd::splat(self.height as f32)).cast::<usize>();
+
+        let colors: MatrixSlice<u8> = self.borrow().flatten();
+
+        // Multiply x by 4, this is necessary since we are indexing `colors` now
+        let x = x << Simd::splat(2);
+
+        let or = Simd::splat(0);
+        let r = colors.simd_index_select_or(mask, x, y, or);
+        let g = colors.simd_index_select_or(mask, x + Simd::splat(1), y, or);
+        let b = colors.simd_index_select_or(mask, x + Simd::splat(2), y, or);
+        let a = colors.simd_index_select_or(mask, x + Simd::splat(3), y, or);
+        let u8_max = Simd::splat(255.0_f32);
+        Vec4xN::from([
+            r.cast() / u8_max,
+            g.cast() / u8_max,
+            b.cast() / u8_max,
+            a.cast() / u8_max,
+        ])
     }
 }
 
