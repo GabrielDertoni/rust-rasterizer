@@ -5,7 +5,7 @@ use winit::{
     dpi::{LogicalSize, PhysicalPosition},
     event::{ElementState, Event, KeyboardInput, VirtualKeyCode, WindowEvent, DeviceEvent},
     event_loop::EventLoop,
-    window::{CursorGrabMode, Fullscreen, WindowBuilder},
+    window::{CursorGrabMode, WindowBuilder},
 };
 
 use std::time::{Duration, Instant};
@@ -144,11 +144,15 @@ impl World {
             self.camera.transform_matrix(near, far),
             light_camera.transform_matrix(),
         );
+        let texture = &self.obj.materials[0].map_kd;
+        let (texture_pixels, _) = texture.as_chunks::<4>();
+        let texture = buf::MatrixSlice::new(texture_pixels, texture.width() as usize, texture.height() as usize);
         let frag_shader = shaders::lit::LitFragmentShader::new(
             self.camera.position,
             model,
             light_pos,
             Vec3::from([1., 1., 1.]),
+            texture,
             shadow_map.borrow(),
         );
 
@@ -325,8 +329,11 @@ impl Camera {
     }
 }
 
-const WIDTH: u32 = 480;
-const HEIGHT: u32 = 480;
+// const WIDTH: u32 = 480;
+// const HEIGHT: u32 = 480;
+
+const WIDTH: u32 = 720;
+const HEIGHT: u32 = 720;
 
 fn main() {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
@@ -350,11 +357,16 @@ fn main() {
     event_loop.run(move |event, _, control_flow| {
         control_flow.set_poll();
 
-        window
-            .set_cursor_grab(CursorGrabMode::Confined)
-            .unwrap();
-        window.set_cursor_visible(false);
-        window.set_cursor_position(PhysicalPosition::new(wsize.width / 2, wsize.height / 2)).unwrap();
+        if window.has_focus() {
+            window
+                .set_cursor_grab(CursorGrabMode::Confined)
+                .unwrap();
+            window.set_cursor_visible(false);
+            window.set_cursor_position(PhysicalPosition::new(wsize.width / 2, wsize.height / 2)).unwrap();
+        } else {
+            window.set_cursor_grab(CursorGrabMode::None).unwrap();
+            window.set_cursor_visible(true);
+        }
 
         match event {
             Event::WindowEvent {

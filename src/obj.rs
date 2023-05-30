@@ -44,6 +44,7 @@ impl Obj {
         let mut tris = Vec::new();
         let mut materials = Vec::new();
         for (linenum, line) in obj.lines().enumerate() {
+            let linenum = linenum + 1;
             let mut it = line.split_ascii_whitespace();
             match it.next() {
                 Some("v") => {
@@ -56,9 +57,8 @@ impl Obj {
                         .with_context(|| format!("failed to parse normal vertex {linenum}:{path:?}"))?
                 }),
                 Some("vt") => uvs.push({
-                    let vec: Vec3 = parse_vertex_coords(it)
-                        .with_context(|| format!("failed to parse uv vertex at {linenum}:{path:?}"))?;
-                    vec.xy()
+                    parse_vertex_coords(it)
+                        .with_context(|| format!("failed to parse uv vertex at {linenum}:{path:?}"))?
                 }),
                 Some("f") => parse_face_idxs(it, &mut tris)
                     .with_context(|| format!("failed to parse face indices at {linenum}:{path:?}"))?,

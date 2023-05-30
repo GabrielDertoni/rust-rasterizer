@@ -4,7 +4,7 @@ use std::simd::{
 
 use crate::{
     buf,
-    vec::{Mat4x4, Vec, Vec2i, Vec3, Vec3xN, Vec4, Vec4xN},
+    vec::{Mat4x4, Vec, Vec2, Vec3, Vec2xN, Vec3xN, Vec4, Vec4xN},
     Attributes, FragmentShader, Vertex, VertexShader,
 };
 
@@ -32,6 +32,7 @@ impl VertexShader<Vertex> for LitVertexShader {
             LitAttributes {
                 normal: vertex.normal,
                 frag_position: vertex.position,
+                uv: vertex.uv,
                 shadow_uv,
             },
             self.transform * vertex.position,
@@ -42,6 +43,7 @@ impl VertexShader<Vertex> for LitVertexShader {
 pub struct LitAttributes {
     pub normal: Vec3,
     pub frag_position: Vec4,
+    pub uv: Vec2,
     pub shadow_uv: Vec4,
 }
 
@@ -51,6 +53,7 @@ where
 {
     pub normal: Vec3xN<LANES>,
     pub frag_position: Vec4xN<LANES>,
+    pub uv: Vec2xN<LANES>,
     pub shadow_uv: Vec4xN<LANES>,
 }
 
@@ -66,6 +69,7 @@ impl Attributes for LitAttributes {
         LitAttributesSimd {
             normal: self.normal.splat(),
             frag_position: self.frag_position.splat(),
+            uv: self.uv.splat(),
             shadow_uv: self.shadow_uv.splat(),
         }
     }
@@ -84,6 +88,7 @@ impl Attributes for LitAttributes {
             frag_position: w.x * p0.frag_position.splat()
                 + w.y * p1.frag_position.splat()
                 + w.z * p2.frag_position.splat(),
+            uv: w.x * p0.uv.splat() + w.y * p1.uv.splat() + w.z * p2.uv.splat(),
             shadow_uv: w.x * p0.shadow_uv.splat()
                 + w.y * p1.shadow_uv.splat()
                 + w.z * p2.shadow_uv.splat(),
@@ -96,6 +101,7 @@ pub struct LitFragmentShader<'a> {
     normal_local_to_world: Mat4x4,
     light_pos: Vec3,
     light_color: Vec3,
+    texture: buf::MatrixSlice<'a, [u8; 4]>,
     shadow_map: buf::MatrixSlice<'a, f32>,
 }
 
@@ -105,6 +111,7 @@ impl<'a> LitFragmentShader<'a> {
         model: Mat4x4,
         light_pos: Vec3,
         light_color: Vec3,
+        texture: buf::MatrixSlice<'a, [u8; 4]>,
         shadow_map: buf::MatrixSlice<'a, f32>,
     ) -> Self {
         LitFragmentShader {
@@ -112,6 +119,7 @@ impl<'a> LitFragmentShader<'a> {
             normal_local_to_world: model.inverse().transpose(),
             light_pos,
             light_color,
+            texture,
             shadow_map,
         }
     }
@@ -125,7 +133,7 @@ impl<'a> FragmentShader for LitFragmentShader<'a> {
     // source: https://learnopengl.com/Advanced-Lighting/Shadows/Shadow-Mapping
     fn exec<const LANES: usize>(
         &self,
-        _mask: Mask<i32, LANES>,
+        mask: Mask<i32, LANES>,
         _pixel_coords: Vec<Simd<i32, LANES>, 2>,
         attrs: LitAttributesSimd<LANES>,
     ) -> Vec4xN<LANES>
@@ -167,8 +175,43 @@ impl<'a> FragmentShader for LitFragmentShader<'a> {
 
         let specular = specular_intensity * self.light_color.splat();
 
-        let color = ambient.splat()
-            + (diffuse + specular).map_3(|el| lit_mask.select(el, Simd::splat(0.0)));
+        let [u, v] = attrs.uv.to_array();
+        let x = (u * Simd::splat(self.texture.width as f32)).cast::<i32>();
+        let y = ((Simd::splat(1.0) - v) * Simd::splat(self.texture.height as f32)).cast::<i32>();
+        let texture_idx = (y * Simd::splat(self.texture.width as i32) + x).cast::<usize>();
+
+        let texture_color = {
+            Vec3xN::from([
+                Simd::from(std::array::from_fn(|lane| {
+                    let idx = texture_idx.as_array()[lane];
+                    if mask.test(lane) {
+                        self.texture.as_slice()[idx][0] as f32 / 255.
+                    } else {
+                        0.
+                    }
+                })),
+                Simd::from(std::array::from_fn(|lane| {
+                    let idx = texture_idx.as_array()[lane];
+                    if mask.test(lane) {
+                        self.texture.as_slice()[idx][1] as f32 / 255.
+                    } else {
+                        0.
+                    }
+                })),
+                Simd::from(std::array::from_fn(|lane| {
+                    let idx = texture_idx.as_array()[lane];
+                    if mask.test(lane) {
+                        self.texture.as_slice()[idx][2] as f32 / 255.
+                    } else {
+                        0.
+                    }
+                })),
+            ])
+        };
+
+        let color = (ambient.splat()
+            + (diffuse + specular).map_3(|el| lit_mask.select(el, Simd::splat(0.0)))).element_mul(texture_color);
+        // let color = texture_color;
 
         Vec4xN::from([color.x, color.y, color.z, Simd::splat(1.)])
     }
