@@ -2,4 +2,6 @@
 
 ## TODOs
 
-[ ] Perspective correct, homogeneous coordinates
+[ ] BUG: stop rendering things that are behind the camera
+[ ] Make `FpvCamera` work correctly for every `up` vector
+[X] Perspective correct, barycentric coordinates
