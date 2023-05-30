@@ -29,6 +29,7 @@ impl rasterization::FragmentShader for Frag {
     fn exec<const LANES: usize>(
         &self,
         _mask: Mask<i32, LANES>,
+        _pixel_coords: Vec<Simd<i32, LANES>, 2>,
         (pos, texcoord, color): Self::SimdAttr<LANES>,
     ) -> Vec4xN<LANES>
     where
