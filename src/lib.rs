@@ -16,7 +16,7 @@ pub mod vec;
 
 // TODO: Move to separate crate
 pub mod frag_shaders;
-pub mod world;
+pub mod shaders;
 
 pub type ScreenPos = (i32, i32, f32);
 pub type Pixel = [u8; 4];
@@ -24,7 +24,7 @@ pub type Pixel = [u8; 4];
 use std::simd::{LaneCount, Mask, Simd, SupportedLaneCount};
 
 use obj::Index;
-use vec::{Mat4x4, Vec, Vec2, Vec3, Vec4};
+use vec::{Mat4x4, Vec, Vec2, Vec3, Vec4, Vec4xN};
 
 pub fn triangles_iter<'a, V>(
     vert: &'a [V],
@@ -129,9 +129,9 @@ impl VertShader {
 }
 
 impl VertexShader<Vertex> for VertShader {
-    type Attrs = Vertex;
+    type Output = Vertex;
 
-    fn exec(&self, vertex: Vertex) -> (Self::Attrs, Vec4) {
+    fn exec(&self, vertex: Vertex) -> (Self::Output, Vec4) {
         (vertex, self.transform * vertex.position)
     }
 }
@@ -180,9 +180,10 @@ pub trait FragmentShader {
 
     fn exec<const LANES: usize>(
         &self,
-        _mask: Mask<i32, LANES>,
+        mask: Mask<i32, LANES>,
+        pixel_coords: Vec<Simd<i32, LANES>, 2>,
         attrs: Self::SimdAttr<LANES>,
-    ) -> Vec<Simd<f32, LANES>, 4>
+    ) -> Vec4xN<LANES>
     where
         LaneCount<LANES>: SupportedLaneCount;
 
@@ -190,13 +191,13 @@ pub trait FragmentShader {
         &self,
         mask: Mask<i32, 4>,
         attrs: Self::SimdAttr<4>,
-        _pixel_coords: Vec<Simd<i32, 4>, 2>,
+        pixel_coords: Vec<Simd<i32, 4>, 2>,
         pixels: &mut Simd<u32, 4>,
     ) {
         use std::simd::SimdFloat;
 
         let colors = Simd::from(
-            self.exec(mask, attrs)
+            self.exec(mask, pixel_coords, attrs)
                 .map_4(|el| {
                     (el.simd_clamp(Simd::splat(0.0), Simd::splat(1.0)) * Simd::splat(255.0))
                         .cast::<u8>()
@@ -210,9 +211,21 @@ pub trait FragmentShader {
 }
 
 pub trait VertexShader<Vertex> {
-    type Attrs: Attributes;
+    type Output: Attributes;
 
-    fn exec(&self, vertex: Vertex) -> (Self::Attrs, Vec4);
+    fn exec(&self, vertex: Vertex) -> (Self::Output, Vec4);
+}
+
+impl<Vertex, F, Output> VertexShader<Vertex> for F
+where
+    F: Fn(Vertex) -> (Output, Vec4),
+    Output: Attributes,
+{
+    type Output = Output;
+
+    fn exec(&self, vertex: Vertex) -> (Self::Output, Vec4) {
+        (self)(vertex)
+    }
 }
 
 pub trait Attributes: Sized {
@@ -344,4 +357,13 @@ pub trait VertexBuf {
     type Vertex;
 
     fn index(&self, index: Self::Index) -> Self::Vertex;
+}
+
+impl<V: Copy> VertexBuf for [V] {
+    type Index = usize;
+    type Vertex = V;
+
+    fn index(&self, index: Self::Index) -> Self::Vertex {
+        self[index]
+    }
 }

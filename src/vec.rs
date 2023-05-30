@@ -4,6 +4,7 @@ use std::ops::{
 };
 use std::simd::{LaneCount, Simd, SimdElement, SimdFloat, SimdOrd, StdFloat, SupportedLaneCount};
 
+pub type Mat3x3 = Mat<f32, 3, 3>;
 pub type Mat4x4 = Mat<f32, 4, 4>;
 
 #[repr(transparent)]
@@ -111,6 +112,60 @@ impl<const M: usize, const N: usize> Mat<f32, M, N> {
 impl<const M: usize, const N: usize> Mat<i32, M, N> {
     pub fn to_f32(self) -> Mat<f32, M, N> {
         self.map(|el| el as f32)
+    }
+}
+
+impl<T: Num> Mat<T, 3, 3> {
+    // source: https://www.cuemath.com/algebra/inverse-of-3x3-matrix/
+    pub fn inverse(&self) -> Self {
+        let det = self.determinant();
+        self.adjugate() / det
+    }
+
+    pub fn determinant(&self) -> T {
+        let m = &self.0;
+        m[0][0] * m[1][1] * m[2][2] + m[0][1] * m[1][2] * m[2][0] + m[0][2] * m[1][0] * m[2][1]
+            - m[0][0] * m[1][2] * m[2][1]
+            - m[0][1] * m[1][0] * m[2][2]
+            - m[0][2] * m[1][1] * m[2][0]
+    }
+
+    pub fn adjugate(&self) -> Self {
+        let [m00, m01, m02] = self.0[0];
+        let [m10, m11, m12] = self.0[1];
+        let [m20, m21, m22] = self.0[2];
+
+        /*
+        let col0 = Vec::from([m00, m10, m20]);
+        let col1 = Vec::from([m01, m11, m21]);
+        let col2 = Vec::from([m02, m12, m22]);
+        let [a00, a10, a20] = col1.cross(col2).to_array();
+        let [a01, a11, a21] = col2.cross(col0).to_array();
+        let [a02, a12, a22] = col0.cross(col1).to_array();
+        Self::from([
+            [a00, a01, a02], //
+            [a10, a11, a12],
+            [a20, a21, a22],
+        ])
+        */
+
+        Self::from([
+            [
+                m11 * m22 - m12 * m21,
+                -(m10 * m22 - m12 * m20),
+                (m10 * m21 - m11 * m20),
+            ],
+            [
+                -(m01 * m22 - m02 * m21),
+                m00 * m22 - m02 * m20,
+                -(m00 * m21 - m01 * m20),
+            ],
+            [
+                m01 * m12 - m02 * m11,
+                -(m00 * m12 - m02 * m10),
+                m00 * m11 - m01 * m10,
+            ],
+        ])
     }
 }
 
@@ -376,6 +431,10 @@ pub type Vec4i = Vec<i32, 4>;
 pub type Vec2x4 = Vec<Simd<f32, 4>, 2>;
 pub type Vec3x4 = Vec<Simd<f32, 4>, 3>;
 pub type Vec4x4 = Vec<Simd<f32, 4>, 4>;
+
+pub type Vec2xN<const N: usize> = Vec<Simd<f32, N>, 2>;
+pub type Vec3xN<const N: usize> = Vec<Simd<f32, N>, 3>;
+pub type Vec4xN<const N: usize> = Vec<Simd<f32, N>, 4>;
 
 pub type IVec2x4 = Vec<Simd<i32, 4>, 2>;
 pub type IVec3x4 = Vec<Simd<i32, 4>, 3>;
@@ -648,6 +707,16 @@ impl<T: Num, const M: usize, const N: usize> Mul<T> for Mat<T, M, N> {
             }
         }
         ret
+    }
+}
+
+impl<T: Num, const M: usize, const N: usize> MulAssign<T> for Mat<T, M, N> {
+    fn mul_assign(&mut self, rhs: T) {
+        for i in 0..M {
+            for j in 0..N {
+                self[(i, j)] *= rhs;
+            }
+        }
     }
 }
 
@@ -1176,3 +1245,26 @@ macro_rules! impl_num_float_simd {
 }
 
 impl_num_float_simd!(f32, f64);
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    #[rustfmt::skip]
+    pub fn test_adjugate_3() {
+        assert_eq!(
+            Mat::<f32, 3, 3>::from([
+                [ 1.,  2., -1.],
+                [ 2.,  1.,  2.],
+                [-1.,  2.,  1.],
+            ])
+            .adjugate(),
+            Mat::<f32, 3, 3>::from([
+                [-3., -4.,  5.],
+                [-4.,  0., -4.],
+                [ 5., -4., -3.],
+            ]),
+        )
+    }
+}

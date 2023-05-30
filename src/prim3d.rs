@@ -71,9 +71,9 @@ pub fn draw_triangles<B, V, S>(
     pixels: PixelBuf,
     depth_buf: MatrixSliceMut<f32>,
 ) where
-    B: VertexBuf,
+    B: VertexBuf + ?Sized,
     V: VertexShader<B::Vertex>,
-    S: FragmentShader<SimdAttr<4> = <V::Attrs as Attributes>::Simd<4>>,
+    S: FragmentShader<SimdAttr<4> = <V::Output as Attributes>::Simd<4>>,
 {
     use std::simd::SimdPartialOrd;
 
@@ -118,13 +118,21 @@ pub fn draw_triangles<B, V, S>(
         let (attrs1, p1) = vert_shader.exec(vert.index(v1));
         let (attrs2, p2) = vert_shader.exec(vert.index(v2));
 
-        let p0 = ndc_to_screen * (p0 / p0.w);
-        let p1 = ndc_to_screen * (p1 / p1.w);
-        let p2 = ndc_to_screen * (p2 / p2.w);
+        let inv_ws = [1. / p0.w, 1. / p1.w, 1. / p2.w];
 
-        let p0i = p0.xy().to_i32();
-        let p1i = p1.xy().to_i32();
-        let p2i = p2.xy().to_i32();
+        let p0_ndc = p0 * inv_ws[0];
+        let p1_ndc = p1 * inv_ws[1];
+        let p2_ndc = p2 * inv_ws[2];
+
+        let p0_screen = ndc_to_screen * p0_ndc;
+        let p1_screen = ndc_to_screen * p1_ndc;
+        let p2_screen = ndc_to_screen * p2_ndc;
+
+        let screen_zs = Vec3::from([p0_screen.z, p1_screen.z, p2_screen.z]);
+
+        let p0i = p0_screen.xy().to_i32();
+        let p1i = p1_screen.xy().to_i32();
+        let p2i = p2_screen.xy().to_i32();
 
         let mut min = p0i.min(p1i).min(p2i);
         min.x = min.x.next_multiple_of(-(LANES as i32)).max(0);
@@ -138,8 +146,8 @@ pub fn draw_triangles<B, V, S>(
         let tri_area = orient_2d_i32(p0i, p1i, p2i);
 
         let nz = {
-            let u = p0 - p1;
-            let v = p2 - p1;
+            let u = p0_screen - p1_screen;
+            let v = p2_screen - p1_screen;
             u.x * v.y - u.y * v.x
         };
 
@@ -164,19 +172,20 @@ pub fn draw_triangles<B, V, S>(
                 if mask.any() {
                     let w = Vec3xX::from([w0.cast::<f32>(), w1.cast::<f32>(), w2.cast::<f32>()])
                         * inv_area;
-                    let z =
-                        w.x * Simd::splat(p0.z) + w.y * Simd::splat(p1.z) + w.z * Simd::splat(p2.z);
+
+                    let mut w_persp = w.element_mul(Vec3::from(inv_ws).splat());
+                    w_persp /= w_persp.x + w_persp.y + w_persp.z;
+                    let z = w.dot(screen_zs.splat());
                     let prev_depth =
                         unsafe { *depth_buf.as_ptr().add(idx).cast::<Simd<f32, LANES>>() };
-                    let oldmask = mask;
                     let mask = mask & z.simd_lt(prev_depth) & z.simd_ge(Simd::splat(-1.));
-                    let interp = Attributes::interpolate(&attrs0, &attrs1, &attrs2, w);
+                    let interp = Attributes::interpolate(&attrs0, &attrs1, &attrs2, w_persp);
                     let simd_pixels = unsafe {
                         &mut *(&mut pixels[idx] as *mut [u8; 4]).cast::<Simd<u32, LANES>>()
                     };
                     let pixel_coords = IVec2xX::from([Simd::splat(x), Simd::splat(y)])
                         + IVec2xX::from([Simd::from([0, 1, 2, 3]), Simd::from([0, 0, 0, 0])]);
-                    frag_shader.exec_specialized(oldmask, interp, pixel_coords, simd_pixels);
+                    frag_shader.exec_specialized(mask, interp, pixel_coords, simd_pixels);
 
                     let new_depth = mask.select(z, prev_depth);
                     unsafe {
@@ -206,7 +215,7 @@ pub fn draw_triangles_depth<B, V>(
     depth_buf: MatrixSliceMut<f32>,
 ) where
     B: VertexBuf,
-    V: VertexShader<B::Vertex, Attrs = ()>,
+    V: VertexShader<B::Vertex, Output = ()>,
 {
     use std::simd::SimdPartialOrd;
 
