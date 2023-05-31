@@ -92,10 +92,8 @@ impl World {
             * Mat4x4::rotation_x(self.theta)
             * Vec3::repeat(1.0 / self.scale).to_scale();
 
-        let positions: Vec<_> = self.obj.verts.iter().map(|&p| model * p).collect();
-
         let vert_buf = VertBuf {
-            positions: &positions,
+            positions: &self.obj.verts,
             normals: &self.obj.normals,
             uvs: &self.obj.uvs,
         };
@@ -171,6 +169,9 @@ impl World {
         );
 
         if self.enable_logging {
+            let mid_depth = depth_buf[(depth_buf.width / 2, depth_buf.height / 2)];
+            println!("mid depth: {mid_depth}");
+
             let draw_time = draw_timer.elapsed();
             println!("draw time: {draw_time:?}");
 

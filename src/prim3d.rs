@@ -1,4 +1,4 @@
-use std::simd::Simd;
+use std::simd::{Simd, SimdPartialOrd};
 
 use crate::buf::{MatrixSliceMut, PixelBuf};
 use crate::vec::{Vec, Vec2i, Vec3, Vec4};
@@ -58,51 +58,51 @@ pub fn orient_2d_i32(from: Vec2i, to: Vec2i, p: Vec2i) -> i32 {
     u.x * v.y - u.y * v.x
 }
 
-const LANES: usize = 4;
 
 type Vec3xX = Vec<Simd<f32, LANES>, 3>;
 type IVec2xX = Vec<Simd<i32, LANES>, 2>;
 
-pub fn draw_triangles<B, V, S>(
-    vert: &B,
-    tris: &[[B::Index; 3]],
-    vert_shader: &V,
+const LANES: usize = 4;
+const STEP_X: i32 = 4;
+const STEP_Y: i32 = 1;
+
+// (b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x)
+// u.x         * (p.y - a.y) - u.y         * (p.x - a.x)
+// u.x * p.y - u.x * a.y - (u.y * p.x - u.y * a.x);
+// u.x * p.y - u.x * a.y + u.y * a.x - u.y * p.x;
+// u.x * p.y - B         + C         - u.y * p.x;
+// u.x * p.y + (-B)      + C         - u.y * p.x;
+// u.x * p.y +        (C - B)        - u.y * p.x;
+// u.x * p.y +           D           - u.y * p.x;
+// u.x * p.y - u.y * p.x + D;
+#[inline(always)]
+fn orient_2d_step(
+    from: Vec2i,
+    to: Vec2i,
+    p: Vec2i,
+) -> (Vec<Simd<i32, LANES>, 2>, Simd<i32, LANES>) {
+    let u = to - from;
+    let c = u.y * from.x - u.x * from.y;
+    let p = p.splat() + IVec2xX::from([Simd::from([0, 1, 2, 3]), Simd::from([0, 0, 0, 0])]);
+    let w = Simd::splat(u.x) * p.y - Simd::splat(u.y) * p.x + Simd::splat(c);
+    let inc = Vec2i::from([-u.y * STEP_X, u.x * STEP_Y]).splat();
+    (inc, w)
+}
+
+#[inline(always)]
+fn draw_triangle<VertOut, S>(
+    v0: VertOut,
+    v1: VertOut,
+    v2: VertOut,
     frag_shader: &S,
-    pixels: PixelBuf,
+    // `pixels` must be coalesced into bundles of `LANES`
+    // TODO: Maybe these could be `MatrixSliceMut<Simd<u32, LANES>>`, since that's actually how they're used
+    pixels: MatrixSliceMut<u32>,
     depth_buf: MatrixSliceMut<f32>,
 ) where
-    B: VertexBuf + ?Sized,
-    V: VertexShader<B::Vertex>,
-    S: FragmentShader<SimdAttr<4> = <V::Output as Attributes>::Simd<4>>,
+    VertOut: Attributes,
+    S: FragmentShader<SimdAttr<4> = <VertOut as Attributes>::Simd<4>>,
 {
-    use std::simd::SimdPartialOrd;
-
-    const STEP_X: i32 = 4;
-    const STEP_Y: i32 = 1;
-
-    // (b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x)
-    // u.x         * (p.y - a.y) - u.y         * (p.x - a.x)
-    // u.x * p.y - u.x * a.y - (u.y * p.x - u.y * a.x);
-    // u.x * p.y - u.x * a.y + u.y * a.x - u.y * p.x;
-    // u.x * p.y - B         + C         - u.y * p.x;
-    // u.x * p.y + (-B)      + C         - u.y * p.x;
-    // u.x * p.y +        (C - B)        - u.y * p.x;
-    // u.x * p.y +           D           - u.y * p.x;
-    // u.x * p.y - u.y * p.x + D;
-    #[inline(always)]
-    fn orient_2d_step(
-        from: Vec2i,
-        to: Vec2i,
-        p: Vec2i,
-    ) -> (Vec<Simd<i32, LANES>, 2>, Simd<i32, LANES>) {
-        let u = to - from;
-        let c = u.y * from.x - u.x * from.y;
-        let p = p.splat() + IVec2xX::from([Simd::from([0, 1, 2, 3]), Simd::from([0, 0, 0, 0])]);
-        let w = Simd::splat(u.x) * p.y - Simd::splat(u.y) * p.x + Simd::splat(c);
-        let inc = Vec2i::from([-u.y * STEP_X, u.x * STEP_Y]).splat();
-        (inc, w)
-    }
-
     let ndc_to_screen = pixels.ndc_to_screen();
 
     let stride = pixels.stride;
@@ -111,20 +111,147 @@ pub fn draw_triangles<B, V, S>(
     let pixels = pixels.as_slice_mut();
     let depth_buf = depth_buf.as_slice_mut();
 
+    let p0 = *v0.position();
+    let p1 = *v1.position();
+    let p2 = *v2.position();
+
+    let inv_ws = [1. / p0.w, 1. / p1.w, 1. / p2.w];
+
+    let p0_ndc = p0 * inv_ws[0];
+    let p1_ndc = p1 * inv_ws[1];
+    let p2_ndc = p2 * inv_ws[2];
+
+    let ndc_zs = Vec3::from([p0_ndc.z, p1_ndc.z, p2_ndc.z]);
+
+    let p0_screen = ndc_to_screen * p0_ndc;
+    let p1_screen = ndc_to_screen * p1_ndc;
+    let p2_screen = ndc_to_screen * p2_ndc;
+
+    let p0i = p0_screen.xy().to_i32();
+    let p1i = p1_screen.xy().to_i32();
+    let p2i = p2_screen.xy().to_i32();
+
+    let mut min = p0i.min(p1i).min(p2i);
+    min.x = min.x.next_multiple_of(-(LANES as i32)).max(0);
+    min.y = min.y.max(0);
+    let max = p0i
+        .max(p1i)
+        .max(p2i)
+        .min(Vec2i::from([width - STEP_X, height - STEP_Y]));
+
+    // 2 times the area of the triangle
+    let tri_area = orient_2d_i32(p0i, p1i, p2i);
+
+    let nz = {
+        let u = p0_screen - p1_screen;
+        let v = p2_screen - p1_screen;
+        u.x * v.y - u.y * v.x
+    };
+
+    if tri_area <= 0 || nz >= 0.0 {
+        return;
+    }
+
+    let (w0_inc, mut w0_row) = orient_2d_step(p1i, p2i, min);
+    let (w1_inc, mut w1_row) = orient_2d_step(p2i, p0i, min);
+    let (w2_inc, mut w2_row) = orient_2d_step(p0i, p1i, min);
+
+    let inv_area = Simd::splat(1.0 / tri_area as f32);
+
+    let mut row_start = min.y as usize * stride + min.x as usize;
+    for y in (min.y..=max.y).step_by(STEP_Y as usize) {
+        let mut w0 = w0_row;
+        let mut w1 = w1_row;
+        let mut w2 = w2_row;
+        let mut idx = row_start;
+        for x in (min.x..=max.x).step_by(STEP_X as usize) {
+            let mask = (w0 | w1 | w2).simd_ge(Simd::splat(0));
+
+            'generate_fragments: {
+                if !mask.any() {
+                    break 'generate_fragments;
+                }
+
+                let w = Vec3xX::from([w0.cast::<f32>(), w1.cast::<f32>(), w2.cast::<f32>()])
+                    * inv_area;
+
+                let mut w_persp = w.element_mul(Vec3::from(inv_ws).splat());
+                w_persp /= w_persp.x + w_persp.y + w_persp.z;
+
+                // TODO: This prevents rendering things behind the camera, but there must be a better way to do it!
+                let mask = mask
+                    & w_persp.x.simd_ge(Simd::splat(0.))
+                    & w_persp.y.simd_ge(Simd::splat(0.))
+                    & w_persp.z.simd_ge(Simd::splat(0.));
+
+                if !mask.any() {
+                    break 'generate_fragments;
+                }
+
+                let z = w.dot(ndc_zs.splat());
+                let prev_depth =
+                    unsafe { *depth_buf.as_ptr().add(idx).cast::<Simd<f32, LANES>>() };
+                let mask = mask & z.simd_lt(prev_depth) & z.simd_ge(Simd::splat(-1.));
+                let interp = Attributes::interpolate(&v0, &v1, &v2, w_persp);
+                let simd_pixels = unsafe {
+                    &mut *(&mut pixels[idx] as *mut u32).cast::<Simd<u32, LANES>>()
+                };
+                let pixel_coords = IVec2xX::from([Simd::splat(x), Simd::splat(y)])
+                    + IVec2xX::from([Simd::from([0, 1, 2, 3]), Simd::from([0, 0, 0, 0])]);
+                frag_shader.exec_specialized(mask, interp, pixel_coords, simd_pixels);
+
+                let new_depth = mask.select(z, prev_depth);
+                unsafe {
+                    let ptr = &mut depth_buf[idx] as *mut f32;
+                    *ptr.cast::<Simd<f32, LANES>>() = new_depth;
+                }
+            }
+
+            w0 += w0_inc.x;
+            w1 += w1_inc.x;
+            w2 += w2_inc.x;
+
+            idx += STEP_X as usize;
+        }
+        w0_row += w0_inc.y;
+        w1_row += w1_inc.y;
+        w2_row += w2_inc.y;
+
+        row_start += stride * STEP_Y as usize;
+    }
+}
+
+pub fn draw_triangles<B, V, S>(
+    vert: &B,
+    tris: &[[B::Index; 3]],
+    vert_shader: &V,
+    frag_shader: &S,
+    mut pixels: PixelBuf,
+    mut depth_buf: MatrixSliceMut<f32>,
+) where
+    B: VertexBuf + ?Sized,
+    V: VertexShader<B::Vertex>,
+    S: FragmentShader<SimdAttr<4> = <V::Output as Attributes>::Simd<4>>,
+{
+    assert_eq!(pixels.width, depth_buf.width);
+    assert_eq!(pixels.height, depth_buf.height);
+
     // Coalesce the pixel layout to be [rrrrggggbbbbaaaa] repeating
+    assert_eq!(pixels.width % 4, 0, "width must be a multiple of 4");
+    assert!(pixels
+        .as_ptr()
+        .is_aligned_to(std::mem::align_of::<Vec<Simd<u8, 4>, 4>>()));
     {
-        assert_eq!(width % 4, 0, "width must be a multiple of 4");
-        assert!(pixels
-            .as_ptr()
-            .is_aligned_to(std::mem::align_of::<Vec<Simd<u8, 4>, 4>>()));
         let pixels = unsafe {
             let ptr = pixels.as_mut_ptr().cast::<Vec<Simd<u8, 4>, 4>>();
-            std::slice::from_raw_parts_mut(ptr, pixels.len() >> 2)
+            std::slice::from_raw_parts_mut(ptr, pixels.size() >> 2)
         };
         for el in pixels {
             *el = el.simd_transpose_4();
         }
     }
+
+    let mut pixels_u32: MatrixSliceMut<u32> = unsafe { pixels.borrow().cast() };
 
     for &[v0, v1, v2] in tris {
         let (v2, v1, v0) = (v0, v1, v2);
@@ -133,121 +260,14 @@ pub fn draw_triangles<B, V, S>(
         let attrs1 = vert_shader.exec(vert.index(v1));
         let attrs2 = vert_shader.exec(vert.index(v2));
 
-        let p0 = *attrs0.position();
-        let p1 = *attrs1.position();
-        let p2 = *attrs2.position();
-
-        let inv_ws = [1. / p0.w, 1. / p1.w, 1. / p2.w];
-
-        let p0_ndc = p0 * inv_ws[0];
-        let p1_ndc = p1 * inv_ws[1];
-        let p2_ndc = p2 * inv_ws[2];
-
-        let p0_screen = ndc_to_screen * p0_ndc;
-        let p1_screen = ndc_to_screen * p1_ndc;
-        let p2_screen = ndc_to_screen * p2_ndc;
-
-        let screen_zs = Vec3::from([p0_screen.z, p1_screen.z, p2_screen.z]);
-
-        let p0i = p0_screen.xy().to_i32();
-        let p1i = p1_screen.xy().to_i32();
-        let p2i = p2_screen.xy().to_i32();
-
-        let mut min = p0i.min(p1i).min(p2i);
-        min.x = min.x.next_multiple_of(-(LANES as i32)).max(0);
-        min.y = min.y.max(0);
-        let max = p0i
-            .max(p1i)
-            .max(p2i)
-            .min(Vec2i::from([width - STEP_X, height - STEP_Y]));
-
-        // 2 times the area of the triangle
-        let tri_area = orient_2d_i32(p0i, p1i, p2i);
-
-        let nz = {
-            let u = p0_screen - p1_screen;
-            let v = p2_screen - p1_screen;
-            u.x * v.y - u.y * v.x
-        };
-
-        if tri_area <= 0 || nz >= 0.0 {
-            continue;
-        }
-
-        let (w0_inc, mut w0_row) = orient_2d_step(p1i, p2i, min);
-        let (w1_inc, mut w1_row) = orient_2d_step(p2i, p0i, min);
-        let (w2_inc, mut w2_row) = orient_2d_step(p0i, p1i, min);
-
-        let inv_area = Simd::splat(1.0 / tri_area as f32);
-
-        let mut row_start = min.y as usize * stride + min.x as usize;
-        for y in (min.y..=max.y).step_by(STEP_Y as usize) {
-            let mut w0 = w0_row;
-            let mut w1 = w1_row;
-            let mut w2 = w2_row;
-            let mut idx = row_start;
-            for x in (min.x..=max.x).step_by(STEP_X as usize) {
-                let mask = (w0 | w1 | w2).simd_ge(Simd::splat(0));
-
-                'generate_fragments: {
-                    if !mask.any() {
-                        break 'generate_fragments;
-                    }
-
-                    let w = Vec3xX::from([w0.cast::<f32>(), w1.cast::<f32>(), w2.cast::<f32>()])
-                        * inv_area;
-
-                    let mut w_persp = w.element_mul(Vec3::from(inv_ws).splat());
-                    w_persp /= w_persp.x + w_persp.y + w_persp.z;
-
-                    // TODO: This prevents rendering things behind the camera, but there must be a better way to do it!
-                    let mask = mask
-                        & w_persp.x.simd_ge(Simd::splat(0.))
-                        & w_persp.y.simd_ge(Simd::splat(0.))
-                        & w_persp.z.simd_ge(Simd::splat(0.));
-
-                    if !mask.any() {
-                        break 'generate_fragments;
-                    }
-
-                    let z = w.dot(screen_zs.splat());
-                    let prev_depth =
-                        unsafe { *depth_buf.as_ptr().add(idx).cast::<Simd<f32, LANES>>() };
-                    let mask = mask & z.simd_lt(prev_depth) & z.simd_ge(Simd::splat(-1.));
-                    let interp = Attributes::interpolate(&attrs0, &attrs1, &attrs2, w_persp);
-                    let simd_pixels = unsafe {
-                        &mut *(&mut pixels[idx] as *mut [u8; 4]).cast::<Simd<u32, LANES>>()
-                    };
-                    let pixel_coords = IVec2xX::from([Simd::splat(x), Simd::splat(y)])
-                        + IVec2xX::from([Simd::from([0, 1, 2, 3]), Simd::from([0, 0, 0, 0])]);
-                    frag_shader.exec_specialized(mask, interp, pixel_coords, simd_pixels);
-
-                    let new_depth = mask.select(z, prev_depth);
-                    unsafe {
-                        let ptr = &mut depth_buf[idx] as *mut f32;
-                        *ptr.cast::<Simd<f32, LANES>>() = new_depth;
-                    }
-                }
-
-                w0 += w0_inc.x;
-                w1 += w1_inc.x;
-                w2 += w2_inc.x;
-
-                idx += STEP_X as usize;
-            }
-            w0_row += w0_inc.y;
-            w1_row += w1_inc.y;
-            w2_row += w2_inc.y;
-
-            row_start += stride * STEP_Y as usize;
-        }
+        draw_triangle(attrs0, attrs1, attrs2, frag_shader, pixels_u32.borrow(), depth_buf.borrow());
     }
 
     // Restore to original pixel layout
     {
         let pixels = unsafe {
             let ptr = pixels.as_mut_ptr().cast::<Vec<Simd<u8, 4>, 4>>();
-            std::slice::from_raw_parts_mut(ptr, pixels.len() >> 2)
+            std::slice::from_raw_parts_mut(ptr, pixels.size() >> 2)
         };
         for el in pixels {
             *el = el.simd_transpose_4();
@@ -264,25 +284,6 @@ pub fn draw_triangles_depth<B, V>(
     B: VertexBuf,
     V: VertexShader<B::Vertex, Output = Vec4>,
 {
-    use std::simd::SimdPartialOrd;
-
-    const STEP_X: i32 = 4;
-    const STEP_Y: i32 = 1;
-
-    #[inline(always)]
-    fn orient_2d_step(
-        from: Vec2i,
-        to: Vec2i,
-        p: Vec2i,
-    ) -> (Vec<Simd<i32, LANES>, 2>, Simd<i32, LANES>) {
-        let u = to - from;
-        let c = u.y * from.x - u.x * from.y;
-        let p = p.splat() + IVec2xX::from([Simd::from([0, 1, 2, 3]), Simd::from([0, 0, 0, 0])]);
-        let w = Simd::splat(u.x) * p.y - Simd::splat(u.y) * p.x + Simd::splat(c);
-        let inc = Vec2i::from([-u.y * STEP_X, u.x * STEP_Y]).splat();
-        (inc, w)
-    }
-
     let ndc_to_screen = depth_buf.ndc_to_screen();
 
     let stride = depth_buf.stride;

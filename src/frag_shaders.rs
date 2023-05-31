@@ -5,66 +5,6 @@ use crate::{
 
 use std::simd::{LaneCount, Mask, Simd, SupportedLaneCount};
 
-pub struct TextureMappingFragShader<'a> {
-    texture_width: i32,
-    texture_height: i32,
-    texture: &'a [u32],
-}
-
-impl<'a> TextureMappingFragShader<'a> {
-    pub fn new(texture_img: &'a image::RgbaImage) -> Self {
-        let texture_width = texture_img.width();
-        let texture_height = texture_img.height();
-        let texture: &[u8] = &*texture_img;
-        let ptr = texture.as_ptr().cast::<u32>();
-        assert!(ptr.is_aligned());
-        // SAFETY: Pointer is aligned
-        let texture = unsafe { std::slice::from_raw_parts(ptr, texture.len() / 4) };
-        TextureMappingFragShader {
-            texture_width: texture_width as i32,
-            texture_height: texture_height as i32,
-            texture,
-        }
-    }
-}
-
-impl<'a> FragmentShader for TextureMappingFragShader<'a> {
-    type SimdAttr<const LANES: usize> = SimdAttrs<LANES>
-    where
-        LaneCount<LANES>: SupportedLaneCount;
-
-    #[inline(always)]
-    fn exec<const LANES: usize>(
-        &self,
-        _mask: Mask<i32, LANES>,
-        _pixel_coords: Vec<Simd<i32, LANES>, 2>,
-        _attrs: SimdAttrs<LANES>,
-    ) -> Vec<Simd<f32, LANES>, 4>
-    where
-        LaneCount<LANES>: SupportedLaneCount,
-    {
-        panic!("unsupported")
-    }
-
-    #[inline(always)]
-    fn exec_specialized(
-        &self,
-        mask: Mask<i32, 4>,
-        attrs: Self::SimdAttr<4>,
-        _pixel_coords: Vec<Simd<i32, 4>, 2>,
-        pixels: &mut Simd<u32, 4>,
-    ) {
-        let [u, v] = attrs.uv.to_array();
-        let x = (u * Simd::splat(self.texture_width as f32)).cast::<i32>();
-        let y = ((Simd::splat(1.0) - v) * Simd::splat(self.texture_height as f32)).cast::<i32>();
-        let idx = (y * Simd::splat(self.texture_width) + x).cast();
-
-        unsafe {
-            *pixels = Simd::gather_select_unchecked(&self.texture, mask.cast(), idx, *pixels);
-        }
-    }
-}
-
 /*
 pub struct LinearFilteringFragShader<'a> {
     texture_width: u32,

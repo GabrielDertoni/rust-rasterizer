@@ -75,47 +75,6 @@ impl<'a> VertexBuf for VertBuf<'a> {
             uv: self.uvs[index.uv as usize],
         }
     }
-
-    /*
-    #[inline(always)]
-    fn interpolate_simd_specialized(
-        &self,
-        _wi: Vec<Simd<i32, 4>, 3>,
-        w: Vec<Simd<f32, 4>, 3>,
-        _z: Simd<f32, 4>,
-        tri: &Self::Triangle,
-    ) -> Self::SimdAttr {
-        let p0 = tri.vertices[0].position.to_array();
-        let p1 = tri.vertices[1].position.to_array();
-        let p2 = tri.vertices[2].position.to_array();
-
-        let p0 = Vec::from(crate::unroll_array!(i = 0, 1, 2 => Simd::splat(p0[i])));
-        let p1 = Vec::from(crate::unroll_array!(i = 0, 1, 2 => Simd::splat(p1[i])));
-        let p2 = Vec::from(crate::unroll_array!(i = 0, 1, 2 => Simd::splat(p2[i])));
-
-        let n0 = tri.vertices[0].normal.to_array();
-        let n1 = tri.vertices[1].normal.to_array();
-        let n2 = tri.vertices[2].normal.to_array();
-
-        let n0 = Vec::from(crate::unroll_array!(i = 0, 1, 2 => Simd::splat(n0[i])));
-        let n1 = Vec::from(crate::unroll_array!(i = 0, 1, 2 => Simd::splat(n1[i])));
-        let n2 = Vec::from(crate::unroll_array!(i = 0, 1, 2 => Simd::splat(n2[i])));
-
-        let uv0 = tri.vertices[0].uv.to_array();
-        let uv1 = tri.vertices[1].uv.to_array();
-        let uv2 = tri.vertices[2].uv.to_array();
-
-        let uv0 = Vec::from(crate::unroll_array!(i = 0, 1 => Simd::splat(uv0[i])));
-        let uv1 = Vec::from(crate::unroll_array!(i = 0, 1 => Simd::splat(uv1[i])));
-        let uv2 = Vec::from(crate::unroll_array!(i = 0, 1 => Simd::splat(uv2[i])));
-
-        SimdAttr {
-            position: w.x * p0 + w.y * p1 + w.z * p2,
-            normal: w.x * n0 + w.y * n1 + w.z * n2,
-            uv: w.x * uv0 + w.y * uv1 + w.z * uv2,
-        }
-    }
-    */
 }
 
 pub struct VertShader {
@@ -132,7 +91,11 @@ impl VertexShader<Vertex> for VertShader {
     type Output = Vertex;
 
     fn exec(&self, vertex: Vertex) -> Self::Output {
-        vertex
+        Vertex {
+            position: self.transform * vertex.position,
+            normal: vertex.normal,
+            uv: vertex.uv,
+        }
     }
 }
 
