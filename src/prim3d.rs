@@ -188,12 +188,28 @@ pub fn draw_triangles<B, V, S>(
             let mut idx = row_start;
             for x in (min.x..=max.x).step_by(STEP_X as usize) {
                 let mask = (w0 | w1 | w2).simd_ge(Simd::splat(0));
-                if mask.any() {
+
+                'generate_fragments: {
+                    if !mask.any() {
+                        break 'generate_fragments;
+                    }
+
                     let w = Vec3xX::from([w0.cast::<f32>(), w1.cast::<f32>(), w2.cast::<f32>()])
                         * inv_area;
 
                     let mut w_persp = w.element_mul(Vec3::from(inv_ws).splat());
                     w_persp /= w_persp.x + w_persp.y + w_persp.z;
+
+                    // TODO: This prevents rendering things behind the camera, but there must be a better way to do it!
+                    let mask = mask
+                        & w_persp.x.simd_ge(Simd::splat(0.))
+                        & w_persp.y.simd_ge(Simd::splat(0.))
+                        & w_persp.z.simd_ge(Simd::splat(0.));
+
+                    if !mask.any() {
+                        break 'generate_fragments;
+                    }
+
                     let z = w.dot(screen_zs.splat());
                     let prev_depth =
                         unsafe { *depth_buf.as_ptr().add(idx).cast::<Simd<f32, LANES>>() };
@@ -212,6 +228,7 @@ pub fn draw_triangles<B, V, S>(
                         *ptr.cast::<Simd<f32, LANES>>() = new_depth;
                     }
                 }
+
                 w0 += w0_inc.x;
                 w1 += w1_inc.x;
                 w2 += w2_inc.x;
