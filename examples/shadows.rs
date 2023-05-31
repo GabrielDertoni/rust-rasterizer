@@ -219,6 +219,9 @@ fn main() {
 
     let mut world = World::new(WIDTH, HEIGHT, model);
 
+    let core_id = core_affinity::get_core_ids().unwrap()[0];
+    core_affinity::set_for_current(core_id);
+
     let mut start = Instant::now();
     event_loop.run(move |event, _, control_flow| {
         control_flow.set_poll();

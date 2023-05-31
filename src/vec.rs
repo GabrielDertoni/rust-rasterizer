@@ -12,16 +12,15 @@ pub type Mat4x4 = Mat<f32, 4, 4>;
 pub struct Mat<T, const M: usize, const N: usize>([[T; N]; M]);
 
 impl<T: Copy, const M: usize, const N: usize> Mat<T, M, N> {
-    // pub fn map<U>(self, mut f: impl FnMut(T) -> U) -> Mat<U, M, N> {
-    //     Mat(self.0.map(|row| row.map(&mut f)))
-    // }
-
     pub fn map<F, U>(self, f: F) -> Mat<U, M, N>
     where
         F: Fn(T) -> U,
     {
+        // Yep, this is some shit code! But as it turns out, the builtin array `map` won't unroll many times it should. In fact, this was
+        // big enough that in some benchmarks, using the builtin `map` function is ~30% slower. Hence, we're sticking with this for now.
+
         use std::marker::PhantomData;
-        use std::mem::{transmute_copy, ManuallyDrop};
+        use std::mem::ManuallyDrop;
 
         struct FnArr<'a, T, U, F, const N: usize>([ManuallyDrop<T>; N], &'a F, PhantomData<U>);
 
@@ -72,7 +71,7 @@ impl<T: Copy, const M: usize, const N: usize> Mat<T, M, N> {
         let mat = ManuallyDrop::new(self.0);
 
         Mat(detail::array_from_fn(FnMat(
-            unsafe { transmute_copy::<_, [ManuallyDrop<[ManuallyDrop<T>; N]>; M]>(&mat) },
+            unsafe { detail::transmute::<_, [ManuallyDrop<[ManuallyDrop<T>; N]>; M]>(&mat) },
             &f,
             PhantomData,
         )))
@@ -108,76 +107,8 @@ impl<T: Copy, const M: usize, const N: usize> Mat<T, M, N> {
         T: SimdElement,
         LaneCount<LANES>: SupportedLaneCount,
     {
-        // if N == 1 {
-        //     unsafe {
-        //         let v: &Vec<T, M> = std::mem::transmute(&self);
-        //         match M {
-        //             1 => return std::mem::transmute_copy(&v.slice::<0, 1>().splat_1()),
-        //             2 => return std::mem::transmute_copy(&v.slice::<0, 2>().splat_2()),
-        //             3 => return std::mem::transmute_copy(&v.slice::<0, 3>().splat_3()),
-        //             _ => (),
-        //         }
-        //     }
-        // }
         self.map(Simd::splat)
     }
-
-    /*
-    pub fn splat<const LANES: usize>(self) -> Mat<Simd<T, LANES>, M, N>
-    where
-        LaneCount<LANES>: SupportedLaneCount,
-        T: SimdElement,
-    {
-        struct FnArr<T, const N: usize, const LANES: usize>([T; N])
-        where
-            LaneCount<LANES>: SupportedLaneCount,
-            T: SimdElement;
-
-        impl<T, const N: usize, const LANES: usize> detail::ConstFn for FnArr<T, N, LANES>
-        where
-            LaneCount<LANES>: SupportedLaneCount,
-            T: SimdElement,
-        {
-            type Output = Simd<T, LANES>;
-
-            #[inline(always)]
-            fn call<const I: usize>(&mut self) -> Self::Output {
-                Simd::splat(self.0[I])
-            }
-
-            #[inline(always)]
-            fn call_runtime(&mut self, i: usize) -> Self::Output {
-                Simd::splat(self.0[i])
-            }
-        }
-
-        struct FnMat<T, const M: usize, const N: usize, const LANES: usize>(Mat<T, M, N>)
-        where
-            LaneCount<LANES>: SupportedLaneCount,
-            T: SimdElement;
-
-        impl<T, const M: usize, const N: usize, const LANES: usize> detail::ConstFn
-            for FnMat<T, M, N, LANES>
-        where
-            LaneCount<LANES>: SupportedLaneCount,
-            T: SimdElement,
-        {
-            type Output = [Simd<T, LANES>; N];
-
-            #[inline(always)]
-            fn call<const I: usize>(&mut self) -> Self::Output {
-                detail::array_from_fn(FnArr(self.0 .0[I]))
-            }
-
-            #[inline(always)]
-            fn call_runtime(&mut self, i: usize) -> Self::Output {
-                detail::array_from_fn(FnArr(self.0 .0[i]))
-            }
-        }
-
-        Mat(detail::array_from_fn(FnMat(self)))
-    }
-    */
 
     pub fn transpose(self) -> Mat<T, N, M> {
         use std::array::from_fn;
@@ -1449,18 +1380,30 @@ mod detail {
         F: ConstFn<Output = T>,
     {
         use crate::unroll_array;
-        use std::mem::transmute_copy;
 
         unsafe {
             match N {
-                0 => transmute_copy(&([] as [T; 0])),
-                1 => transmute_copy(&unroll_array!(I: usize = 0 => f.call::<I>())),
-                2 => transmute_copy(&unroll_array!(I: usize = 0, 1 => f.call::<I>())),
-                3 => transmute_copy(&unroll_array!(I: usize = 0, 1, 2 => f.call::<I>())),
-                4 => transmute_copy(&unroll_array!(I: usize = 0, 1, 2, 3 => f.call::<I>())),
+                0 => transmute(&([] as [T; 0])),
+                1 => transmute(&unroll_array!(I: usize = 0 => f.call::<I>())),
+                2 => transmute(&unroll_array!(I: usize = 0, 1 => f.call::<I>())),
+                3 => transmute(&unroll_array!(I: usize = 0, 1, 2 => f.call::<I>())),
+                4 => transmute(&unroll_array!(I: usize = 0, 1, 2, 3 => f.call::<I>())),
                 _ => std::array::from_fn(|i| f.call_runtime(i)),
             }
         }
+    }
+
+    /// Transmute from types different types, even when the compiler can't prove that they have the same alignment or size.
+    ///
+    /// # Safety
+    ///
+    /// This is all kinds of unsafe! The caller must guarantee that both `Src` and `Dst` have exactly the same layout and all
+    /// of the other restrictions from `std::mem::transmute_copy` also apply. The difference is that both types are also
+    /// required to have the same alignment.
+    ///
+    #[inline(always)]
+    pub unsafe fn transmute<Src, Dst>(src: &Src) -> Dst {
+        std::ptr::read(src as *const Src as *const Dst)
     }
 }
 

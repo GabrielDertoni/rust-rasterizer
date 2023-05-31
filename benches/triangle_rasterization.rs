@@ -126,7 +126,10 @@ fn shadows(c: &mut Criterion) {
         texture.height() as usize,
     );
 
+    let core_id = core_affinity::get_core_ids().unwrap()[0];
+
     group.bench_function("draw_triangles", |b| {
+        core_affinity::set_for_current(core_id);
         b.iter(|| {
             let shadow_map = {
                 shadow_map.fill(1.0);

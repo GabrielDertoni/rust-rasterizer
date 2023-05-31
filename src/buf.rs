@@ -1,7 +1,7 @@
 use std::marker::PhantomData;
 use std::ops::{Bound, Index, IndexMut, RangeBounds};
 use std::simd::{
-    LaneCount, Mask, Simd, SimdElement, SimdFloat, SimdPartialOrd, SupportedLaneCount,
+    LaneCount, Mask, Simd, SimdConstPtr, SimdElement, SimdFloat, SimdPartialOrd, SupportedLaneCount,
 };
 
 use crate::vec::{Mat4x4, Vec, Vec2xN, Vec3, Vec4xN};
@@ -21,6 +21,7 @@ pub struct MatrixSlice<'a, E> {
 impl<'a, E> MatrixSlice<'a, E> {
     pub fn new(buf: &'a [E], width: usize, height: usize) -> Self {
         assert_eq!(buf.len(), width * height);
+        assert!(buf.as_ptr().is_aligned_to(std::mem::align_of::<u32>()));
         let ptr = buf.as_ptr();
         MatrixSlice {
             width,
@@ -304,6 +305,7 @@ where
 type Texture<'a> = MatrixSlice<'a, Pixel>;
 
 impl<'a> Texture<'a> {
+    /*
     #[inline]
     pub fn texture_idx<const LANES: usize>(
         &self,
@@ -319,16 +321,20 @@ impl<'a> Texture<'a> {
         let x = (u * Simd::splat(self.width as f32)).cast::<usize>();
         let y = ((Simd::splat(1.) - v) * Simd::splat(self.height as f32)).cast::<usize>();
 
-        let colors: MatrixSlice<u8> = self.borrow().flatten();
+        let ptr = Simd::splat(self.ptr.cast::<u32>());
 
         // Multiply x by 4, this is necessary since we are indexing `colors` now
         let x = x << Simd::splat(2);
 
         let or = Simd::splat(0);
-        let r = colors.simd_index_select_or(mask, x, y, or);
-        let g = colors.simd_index_select_or(mask, x + Simd::splat(1), y, or);
-        let b = colors.simd_index_select_or(mask, x + Simd::splat(2), y, or);
-        let a = colors.simd_index_select_or(mask, x + Simd::splat(3), y, or);
+
+        let idx = y * Simd::splat(self.stride) + x;
+        let colors = Simd::gather_select_ptr(ptr.wrapping_add(idx), mask, or);
+
+        Vec::from(colors.to_array())
+            .map(|el| Simd::from_array(el.to_ne_bytes()))
+            .simd_transpose_4()
+
         let u8_max = Simd::splat(255.0_f32);
         Vec4xN::from([
             r.cast() / u8_max,
@@ -336,6 +342,30 @@ impl<'a> Texture<'a> {
             b.cast() / u8_max,
             a.cast() / u8_max,
         ])
+    }
+    */
+
+    #[inline]
+    pub fn texture_idx_4(&self, uv: Vec2xN<4>, mask: Mask<i32, 4>) -> Vec4xN<4> {
+        let mask = mask.cast();
+        let [u, v] = uv.to_array();
+
+        let u = u.simd_clamp(Simd::splat(0.), Simd::splat(1.));
+        let v = v.simd_clamp(Simd::splat(0.), Simd::splat(1.));
+
+        let x = (u * Simd::splat(self.width as f32)).cast::<usize>();
+        let y = ((Simd::splat(1.) - v) * Simd::splat(self.height as f32)).cast::<usize>();
+
+        let ptr = Simd::splat(self.ptr.cast::<u32>());
+        let idx = y * Simd::splat(self.stride) + x;
+        let colors =
+            unsafe { Simd::gather_select_ptr(ptr.wrapping_add(idx), mask, Simd::splat(0)) };
+
+        let u8_max = Simd::splat(255.0_f32);
+        Vec::from(colors.to_array())
+            .map(|el| Simd::from_array(el.to_ne_bytes()))
+            .simd_transpose_4()
+            .map(|el| el.cast::<f32>() / u8_max)
     }
 }
 
