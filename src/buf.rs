@@ -1,8 +1,10 @@
 use std::marker::PhantomData;
 use std::ops::{Bound, Index, IndexMut, RangeBounds};
-use std::simd::{SimdElement, Simd, Mask, LaneCount, SupportedLaneCount, SimdPartialOrd, SimdFloat};
+use std::simd::{
+    LaneCount, Mask, Simd, SimdElement, SimdFloat, SimdPartialOrd, SupportedLaneCount,
+};
 
-use crate::vec::{Vec, Mat4x4, Vec2xN, Vec3, Vec4xN};
+use crate::vec::{Mat4x4, Vec, Vec2xN, Vec3, Vec4xN};
 use crate::Pixel;
 
 pub type PixelBuf<'a> = MatrixSliceMut<'a, Pixel>;
@@ -67,7 +69,12 @@ impl<'a, T, const N: usize> MatrixSlice<'a, [T; N]> {
     }
 
     #[inline]
-    pub fn simd_index_soa<const LANES: usize>(&self, x: Simd<usize, LANES>, y: Simd<usize, LANES>, mask: Mask<isize, LANES>) -> [Simd<T, LANES>; N]
+    pub fn simd_index_soa<const LANES: usize>(
+        &self,
+        x: Simd<usize, LANES>,
+        y: Simd<usize, LANES>,
+        mask: Mask<isize, LANES>,
+    ) -> [Simd<T, LANES>; N]
     where
         LaneCount<LANES>: SupportedLaneCount,
         T: SimdElement + Default,
@@ -76,7 +83,13 @@ impl<'a, T, const N: usize> MatrixSlice<'a, [T; N]> {
     }
 
     #[inline]
-    pub fn simd_index_soa_or<const LANES: usize>(&self, x: Simd<usize, LANES>, y: Simd<usize, LANES>, mask: Mask<isize, LANES>, or: Simd<T, LANES>) -> [Simd<T, LANES>; N]
+    pub fn simd_index_soa_or<const LANES: usize>(
+        &self,
+        x: Simd<usize, LANES>,
+        y: Simd<usize, LANES>,
+        mask: Mask<isize, LANES>,
+        or: Simd<T, LANES>,
+    ) -> [Simd<T, LANES>; N]
     where
         LaneCount<LANES>: SupportedLaneCount,
         T: SimdElement,
@@ -89,7 +102,9 @@ impl<'a, T, const N: usize> MatrixSlice<'a, [T; N]> {
         let flat: MatrixSlice<T> = self.borrow().flatten();
         let x = x * Simd::splat(N);
 
-        std::array::from_fn(move |off| unsafe { flat.simd_index_select_or_unchecked(mask, x + Simd::splat(off), y, or) })
+        std::array::from_fn(move |off| unsafe {
+            flat.simd_index_select_or_unchecked(mask, x + Simd::splat(off), y, or)
+        })
     }
 
     #[inline]
@@ -107,12 +122,18 @@ impl<'a, T, const N: usize> MatrixSlice<'a, [T; N]> {
         let flat: MatrixSlice<T> = self.borrow().flatten();
         let x = x * Simd::splat(N);
 
-        std::array::from_fn(move |off| unsafe { flat.simd_index_select_or_unchecked(mask, x + Simd::splat(off), y, or) })
+        std::array::from_fn(move |off| unsafe {
+            flat.simd_index_select_or_unchecked(mask, x + Simd::splat(off), y, or)
+        })
     }
 
     /// Index the matrix slice with uv coordinates. The access is clamped if the index is out of bounds.
     #[inline]
-    pub fn index_uv<const LANES: usize>(&self, uv: Vec2xN<LANES>, mask: Mask<i32, LANES>) -> Vec<Simd<T, LANES>, N>
+    pub fn index_uv<const LANES: usize>(
+        &self,
+        uv: Vec2xN<LANES>,
+        mask: Mask<i32, LANES>,
+    ) -> Vec<Simd<T, LANES>, N>
     where
         LaneCount<LANES>: SupportedLaneCount,
         T: SimdElement + Default,
@@ -130,7 +151,11 @@ impl<'a, T, const N: usize> MatrixSlice<'a, [T; N]> {
 
     /// Index the matrix slice with uv coordinates. The access is repeated if the index is out of bounds.
     #[inline]
-    pub fn index_uv_repeat<const LANES: usize>(&self, uv: Vec2xN<LANES>, mask: Mask<i32, LANES>) -> Vec<Simd<T, LANES>, N>
+    pub fn index_uv_repeat<const LANES: usize>(
+        &self,
+        uv: Vec2xN<LANES>,
+        mask: Mask<i32, LANES>,
+    ) -> Vec<Simd<T, LANES>, N>
     where
         LaneCount<LANES>: SupportedLaneCount,
         T: SimdElement + Default,
@@ -152,7 +177,12 @@ impl<'a, T, const N: usize> MatrixSlice<'a, [T; N]> {
 
     /// Index the matrix slice with uv coordinates. `or` is returned if the access is out of bounds
     #[inline]
-    pub fn index_uv_or<const LANES: usize>(&self, uv: Vec2xN<LANES>, mask: Mask<i32, LANES>, or: Simd<T, LANES>) -> Vec<Simd<T, LANES>, N>
+    pub fn index_uv_or<const LANES: usize>(
+        &self,
+        uv: Vec2xN<LANES>,
+        mask: Mask<i32, LANES>,
+        or: Simd<T, LANES>,
+    ) -> Vec<Simd<T, LANES>, N>
     where
         LaneCount<LANES>: SupportedLaneCount,
         T: SimdElement,
@@ -168,12 +198,53 @@ impl<'a, T, const N: usize> MatrixSlice<'a, [T; N]> {
     }
 }
 
+impl<'a, T: SimdElement, const N: usize> MatrixSlice<'a, [T; N]> {
+    #[inline]
+    pub fn index_uv_or_4(
+        &self,
+        uv: Vec2xN<4>,
+        mask: Mask<i32, 4>,
+        or: Simd<T, 4>,
+    ) -> Vec<Simd<T, 4>, N> {
+        use core::arch::x86_64;
+
+        let [u, v] = uv.to_array();
+
+        let mask = mask & u.is_sign_positive() & v.is_sign_positive();
+
+        let x = u * Simd::splat(self.width as f32);
+        let x: Simd<i32, 4> = unsafe { x86_64::_mm_cvtps_epi32(x86_64::__m128::from(x)).into() };
+        let x = x.cast::<usize>();
+
+        let y = (Simd::splat(1.) - v) * Simd::splat(self.height as f32);
+        let y: Simd<i32, 4> = unsafe { x86_64::_mm_cvtps_epi32(x86_64::__m128::from(y)).into() };
+        let y = y.cast::<usize>();
+
+        let inbounds = x.simd_le(Simd::splat(self.width)) & y.simd_le(Simd::splat(self.height));
+        debug_assert!(inbounds.all(), "out of bounds");
+
+        let mask = mask.cast() & inbounds;
+
+        let flat: MatrixSlice<T> = self.borrow().flatten();
+        let x = x * Simd::splat(N);
+
+        Vec::from(std::array::from_fn(move |off| unsafe {
+            let idx = y * Simd::splat(self.stride) + x + Simd::splat(off);
+            Simd::gather_select_unchecked(flat.as_slice(), mask, idx, or)
+        }))
+    }
+}
+
 impl<'a, E> MatrixSlice<'a, E>
 where
     E: SimdElement,
 {
     #[inline]
-    pub fn simd_index<const LANES: usize>(&self, x: Simd<usize, LANES>, y: Simd<usize, LANES>) -> Simd<E, LANES>
+    pub fn simd_index<const LANES: usize>(
+        &self,
+        x: Simd<usize, LANES>,
+        y: Simd<usize, LANES>,
+    ) -> Simd<E, LANES>
     where
         LaneCount<LANES>: SupportedLaneCount,
         E: Default,
@@ -182,7 +253,12 @@ where
     }
 
     #[inline]
-    pub fn simd_index_or<const LANES: usize>(&self, x: Simd<usize, LANES>, y: Simd<usize, LANES>, or: Simd<E, LANES>) -> Simd<E, LANES>
+    pub fn simd_index_or<const LANES: usize>(
+        &self,
+        x: Simd<usize, LANES>,
+        y: Simd<usize, LANES>,
+        or: Simd<E, LANES>,
+    ) -> Simd<E, LANES>
     where
         LaneCount<LANES>: SupportedLaneCount,
     {
@@ -229,7 +305,11 @@ type Texture<'a> = MatrixSlice<'a, Pixel>;
 
 impl<'a> Texture<'a> {
     #[inline]
-    pub fn texture_idx<const LANES: usize>(&self, uv: Vec2xN<LANES>, mask: Mask<i32, LANES>) -> Vec4xN<LANES>
+    pub fn texture_idx<const LANES: usize>(
+        &self,
+        uv: Vec2xN<LANES>,
+        mask: Mask<i32, LANES>,
+    ) -> Vec4xN<LANES>
     where
         LaneCount<LANES>: SupportedLaneCount,
     {

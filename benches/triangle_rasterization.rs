@@ -1,14 +1,14 @@
-#![feature(portable_simd, slice_flatten)]
+#![feature(portable_simd, slice_flatten, slice_as_chunks)]
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 
 use rasterization::{
-    buf::{MatrixSliceMut, PixelBuf},
-    frag_shaders::TextureMappingFragShader,
+    buf::{self, MatrixSliceMut, PixelBuf},
     obj::Obj,
-    prim3d,
-    vec::{Mat4x4, Vec3},
-    VertBuf,
+    prim3d, shaders,
+    utils::{Camera, FpvCamera},
+    vec::{Mat4x4, Vec2, Vec3},
+    VertBuf, Vertex,
 };
 
 /*
@@ -62,48 +62,41 @@ fn triangle_rasterization(c: &mut Criterion) {
 }
 */
 
-fn model_with_texture(c: &mut Criterion) {
+fn shadows(c: &mut Criterion) {
     const WIDTH: usize = 720;
     const HEIGHT: usize = 720;
 
     let Obj {
         verts,
-        mut tris,
+        tris,
         normals,
         uvs,
         materials,
         ..
-    } = Obj::load("Skull/12140_Skull_v3_L2.obj".as_ref()).unwrap();
+    } = Obj::load("models/scene2.obj".as_ref()).unwrap();
 
     let mut pixel_storage = vec![[0u8; 4]; WIDTH * HEIGHT];
     let mut pixels = PixelBuf::new(&mut pixel_storage, WIDTH, HEIGHT);
     let mut depth_storage = vec![0.0f32; WIDTH * HEIGHT];
-    let mut depth = MatrixSliceMut::new(&mut depth_storage, WIDTH, HEIGHT);
+    let mut depth_buf = MatrixSliceMut::new(&mut depth_storage, WIDTH, HEIGHT);
 
-    let camera_pos = Vec3::from([0.0, 1.0, -1.0]);
-    let look_at = Vec3::from([0.0, 1.0, 0.0]);
-    let theta = -std::f32::consts::FRAC_PI_2;
-    let scale = 15.0;
+    let mut shadow_map = vec![0.0_f32; WIDTH * HEIGHT];
 
-    let model = Mat4x4::rotation_x(theta) * Vec3::repeat(1.0 / scale).to_scale();
+    let ratio = WIDTH as f32 / HEIGHT as f32;
 
-    let eye = camera_pos;
-    let up = Vec3::from([0.0, 1.0, 0.0]);
+    let camera = FpvCamera {
+        position: Vec3::from([0., -10., 4.]),
+        up: Vec3::from([0., 0., 1.]),
+        pitch: 70.,
+        yaw: 0.,
+        sensitivity: 0.05,
+        speed: 5.,
+        fovy: 39.6,
+        ratio,
+    };
 
-    let look = (look_at - eye).normalized();
-    let right = up.cross(look).normalized();
-    let up = right.cross(look).normalized();
-
-    let view = Mat4x4::from([
-        [right.x, right.y, right.z, -right.dot(eye)],
-        [up.x, up.y, up.z, -up.dot(eye)],
-        [look.x, look.y, look.z, -look.dot(eye)],
-        [0.0, 0.0, 0.0, 1.0],
-    ]);
-
-    let transform = pixels.ndc_to_screen() * view * model;
-
-    let positions: Vec<_> = verts.iter().map(|&p| transform * p).collect();
+    let model = Mat4x4::identity();
+    let positions: Vec<_> = verts.iter().map(|&p| model * p).collect();
 
     let vert_buf = VertBuf {
         positions: &positions,
@@ -111,57 +104,78 @@ fn model_with_texture(c: &mut Criterion) {
         uvs: &uvs,
     };
 
-    let light_dir = Vec3::from([-0.5, 0.5, 0.0]).normalized();
-    let shader = TextureMappingFragShader::new(light_dir, model, &materials[0].map_kd);
+    let light_pos = Vec3::from([0., -3.77, 6.27]);
+    let light_camera =
+        Camera::from_blender(light_pos, Vec3::from([33.9, 0., 0.]), 45., 1., 1., 100.);
 
-    let mut group = c.benchmark_group("model_with_texture");
+    let mut group = c.benchmark_group("shadows");
 
-    group.bench_function("no vertex cache optimization", |b| {
+    let near = 0.1;
+    let far = 100.;
+
+    let vert_shader = shaders::lit::LitVertexShader::new(
+        camera.transform_matrix(near, far),
+        light_camera.transform_matrix(),
+    );
+
+    let texture = &materials[0].map_kd;
+    let (texture_pixels, _) = texture.as_chunks::<4>();
+    let texture = buf::MatrixSlice::new(
+        texture_pixels,
+        texture.width() as usize,
+        texture.height() as usize,
+    );
+
+    group.bench_function("draw_triangles", |b| {
         b.iter(|| {
-            for d in depth.as_slice_mut() {
-                *d = f32::MIN;
-            }
+            let shadow_map = {
+                shadow_map.fill(1.0);
+                let mut shadow_buf =
+                    buf::MatrixSliceMut::new(&mut shadow_map, WIDTH as usize, HEIGHT as usize);
 
-            prim3d::draw_triangles_opt(&vert_buf, &tris, &shader, pixels.borrow(), depth.borrow());
+                let light_transform = light_camera.transform_matrix();
+                prim3d::draw_triangles_depth(
+                    &vert_buf,
+                    &tris,
+                    &|vertex: Vertex| light_transform * vertex.position,
+                    shadow_buf.borrow(),
+                );
+                // Pretty dumb way to make a circular spotlight
+                let radius = shadow_buf.width as f32 * 0.5;
+                let circle_center =
+                    Vec2::from([shadow_buf.width as f32 / 2., shadow_buf.height as f32 / 2.]);
+                for y in 0..shadow_buf.height {
+                    for x in 0..shadow_buf.width {
+                        let p = Vec2::from([x as f32, y as f32]);
+                        if (p - circle_center).mag_sq() >= radius * radius {
+                            shadow_buf[(x, y)] = -1.0;
+                        }
+                    }
+                }
+                buf::MatrixSlice::new(&shadow_map, depth_buf.width, depth_buf.height)
+            };
+
+            depth_buf.as_slice_mut().fill(1.0);
+
+            let frag_shader = shaders::lit::LitFragmentShader::new(
+                camera.position,
+                model,
+                light_pos,
+                Vec3::from([1., 1., 1.]),
+                texture,
+                shadow_map.borrow(),
+            );
+
+            prim3d::draw_triangles(
+                &vert_buf,
+                &tris,
+                &vert_shader,
+                &frag_shader,
+                pixels.borrow(),
+                depth_buf.borrow(),
+            );
             black_box(pixels.borrow());
-            black_box(depth.borrow());
-        })
-    });
-
-    /*
-    let mut n_used = vec![0; verts.len()];
-
-    for tri in &tris {
-        for ix in tri {
-            n_used[ix.position as usize] += 1;
-        }
-    }
-    */
-
-    tris.sort_by_key(|idxs| {
-        /*
-        std::cmp::Reverse(
-            n_used[idxs[0].position as usize]
-                + n_used[idxs[1].position as usize]
-                + n_used[idxs[2].position as usize],
-        )
-        */
-        let v0 = verts[idxs[0].position as usize].xyz();
-        let v1 = verts[idxs[1].position as usize].xyz();
-        let v2 = verts[idxs[2].position as usize].xyz();
-        let mid = (v0 + v1 + v2) / 3.0;
-        (mid.y * WIDTH as f32 + mid.x) as i32
-    });
-
-    group.bench_function("vertex cache optimized", |b| {
-        b.iter(|| {
-            for d in depth.as_slice_mut() {
-                *d = f32::MIN;
-            }
-
-            prim3d::draw_triangles_opt(&vert_buf, &tris, &shader, pixels.borrow(), depth.borrow());
-            black_box(pixels.borrow());
-            black_box(depth.borrow());
+            black_box(depth_buf.borrow());
         })
     });
 
@@ -195,5 +209,5 @@ fn frag_shader_simd(
 }
 */
 
-criterion_group!(benches, model_with_texture);
+criterion_group!(benches, shadows);
 criterion_main!(benches);

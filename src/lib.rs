@@ -131,8 +131,8 @@ impl VertShader {
 impl VertexShader<Vertex> for VertShader {
     type Output = Vertex;
 
-    fn exec(&self, vertex: Vertex) -> (Self::Output, Vec4) {
-        (vertex, self.transform * vertex.position)
+    fn exec(&self, vertex: Vertex) -> Self::Output {
+        vertex
     }
 }
 
@@ -171,6 +171,10 @@ impl Attributes for Vertex {
             uv:       w.x * p0.uv.splat()       + w.y * p1.uv.splat()       + w.z * p2.uv.splat(),
         }
     }
+
+    fn position(&self) -> &Vec4 {
+        &self.position
+    }
 }
 
 pub trait FragmentShader {
@@ -198,32 +202,41 @@ pub trait FragmentShader {
 
         let colors = Simd::from(
             self.exec(mask, pixel_coords, attrs)
-                .map_4(|el| {
-                    (el.simd_clamp(Simd::splat(0.0), Simd::splat(1.0)) * Simd::splat(255.0))
-                        .cast::<u8>()
+                .map(|el| {
+                    u32::from_ne_bytes(
+                        (el.simd_clamp(Simd::splat(0.0), Simd::splat(1.0)) * Simd::splat(255.0))
+                            .cast::<u8>()
+                            .to_array(),
+                    )
                 })
-                .simd_transpose_4() // Convert from SoA to AoS
-                .map_4(|el| u32::from_ne_bytes(el.to_array()))
                 .to_array(),
         );
-        *pixels = mask.select(colors, *pixels);
+
+        // Casting the mask to i8, makes the mask structure have 8x4=32 bits. Since -1 represents true
+        // in the mask, and bits are stored in twos-compliment, that is a bitset with only 1s when true
+        // If we then convert the mask to u32, we'll have a mask for the pixels. We just broadcast this
+        // to every channel and mask the things we want.
+        let mask = mask.cast::<i8>();
+        let mask = Simd::splat(u32::from_ne_bytes(mask.to_int().cast().to_array()));
+
+        *pixels = (colors & mask) + (*pixels & !mask)
     }
 }
 
 pub trait VertexShader<Vertex> {
     type Output: Attributes;
 
-    fn exec(&self, vertex: Vertex) -> (Self::Output, Vec4);
+    fn exec(&self, vertex: Vertex) -> Self::Output;
 }
 
 impl<Vertex, F, Output> VertexShader<Vertex> for F
 where
-    F: Fn(Vertex) -> (Output, Vec4),
+    F: Fn(Vertex) -> Output,
     Output: Attributes,
 {
     type Output = Output;
 
-    fn exec(&self, vertex: Vertex) -> (Self::Output, Vec4) {
+    fn exec(&self, vertex: Vertex) -> Self::Output {
         (self)(vertex)
     }
 }
@@ -246,8 +259,42 @@ pub trait Attributes: Sized {
     ) -> Self::Simd<LANES>
     where
         LaneCount<LANES>: SupportedLaneCount;
+
+    fn position(&self) -> &Vec4;
 }
 
+impl Attributes for Vec4 {
+    type Simd<const LANES: usize> = Vec4xN<LANES>
+    where
+        LaneCount<LANES>: SupportedLaneCount;
+
+    #[inline(always)]
+    fn splat<const LANES: usize>(self) -> Self::Simd<LANES>
+    where
+        LaneCount<LANES>: SupportedLaneCount,
+    {
+        self.splat()
+    }
+
+    #[inline(always)]
+    fn interpolate<const LANES: usize>(
+        p0: &Self,
+        p1: &Self,
+        p2: &Self,
+        w: Vec<Simd<f32, LANES>, 3>,
+    ) -> Self::Simd<LANES>
+    where
+        LaneCount<LANES>: SupportedLaneCount,
+    {
+        w.x * p0.splat() + w.y * p1.splat() + w.z * p2.splat()
+    }
+
+    fn position(&self) -> &Vec4 {
+        self
+    }
+}
+
+/*
 /// The empty attribute set
 impl Attributes for () {
     type Simd<const LANES: usize> = ()
@@ -351,6 +398,7 @@ impl_attributes_tuple!(
     T0: 0, T1: 1, T2: 2, T3: 3;
     T0: 0, T1: 1, T2: 2, T3: 3, T4: 4;
 );
+*/
 
 pub trait VertexBuf {
     type Index: Copy;

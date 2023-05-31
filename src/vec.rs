@@ -12,8 +12,70 @@ pub type Mat4x4 = Mat<f32, 4, 4>;
 pub struct Mat<T, const M: usize, const N: usize>([[T; N]; M]);
 
 impl<T: Copy, const M: usize, const N: usize> Mat<T, M, N> {
-    pub fn map<U>(self, mut f: impl FnMut(T) -> U) -> Mat<U, M, N> {
-        Mat(self.0.map(|row| row.map(&mut f)))
+    // pub fn map<U>(self, mut f: impl FnMut(T) -> U) -> Mat<U, M, N> {
+    //     Mat(self.0.map(|row| row.map(&mut f)))
+    // }
+
+    pub fn map<F, U>(self, f: F) -> Mat<U, M, N>
+    where
+        F: Fn(T) -> U,
+    {
+        use std::marker::PhantomData;
+        use std::mem::{transmute_copy, ManuallyDrop};
+
+        struct FnArr<'a, T, U, F, const N: usize>([ManuallyDrop<T>; N], &'a F, PhantomData<U>);
+
+        impl<'a, T, U, F, const N: usize> detail::ConstFn for FnArr<'a, T, U, F, N>
+        where
+            F: Fn(T) -> U,
+        {
+            type Output = U;
+
+            #[inline(always)]
+            fn call<const I: usize>(&mut self) -> U {
+                let el = unsafe { ManuallyDrop::take(&mut self.0[I]) };
+                (self.1)(el)
+            }
+
+            #[inline(always)]
+            fn call_runtime(&mut self, i: usize) -> U {
+                let el = unsafe { ManuallyDrop::take(&mut self.0[i]) };
+                (self.1)(el)
+            }
+        }
+
+        struct FnMat<'a, T, U, F, const M: usize, const N: usize>(
+            [ManuallyDrop<[ManuallyDrop<T>; N]>; M],
+            &'a F,
+            PhantomData<U>,
+        );
+
+        impl<'a, T, U, F, const M: usize, const N: usize> detail::ConstFn for FnMat<'a, T, U, F, M, N>
+        where
+            F: Fn(T) -> U,
+        {
+            type Output = [U; N];
+
+            #[inline(always)]
+            fn call<const I: usize>(&mut self) -> [U; N] {
+                let arr = unsafe { ManuallyDrop::take(&mut self.0[I]) };
+                detail::array_from_fn(FnArr(arr, self.1, PhantomData))
+            }
+
+            #[inline(always)]
+            fn call_runtime(&mut self, i: usize) -> [U; N] {
+                let arr = unsafe { ManuallyDrop::take(&mut self.0[i]) };
+                detail::array_from_fn(FnArr(arr, self.1, PhantomData))
+            }
+        }
+
+        let mat = ManuallyDrop::new(self.0);
+
+        Mat(detail::array_from_fn(FnMat(
+            unsafe { transmute_copy::<_, [ManuallyDrop<[ManuallyDrop<T>; N]>; M]>(&mat) },
+            &f,
+            PhantomData,
+        )))
     }
 
     /// # Panics
@@ -40,13 +102,82 @@ impl<T: Copy, const M: usize, const N: usize> Mat<T, M, N> {
         unsafe { Mat(transmute_copy(&arr)) }
     }
 
+    #[inline(always)]
     pub fn splat<const LANES: usize>(self) -> Mat<Simd<T, LANES>, M, N>
     where
         T: SimdElement,
         LaneCount<LANES>: SupportedLaneCount,
     {
-        self.map(|el| Simd::splat(el))
+        // if N == 1 {
+        //     unsafe {
+        //         let v: &Vec<T, M> = std::mem::transmute(&self);
+        //         match M {
+        //             1 => return std::mem::transmute_copy(&v.slice::<0, 1>().splat_1()),
+        //             2 => return std::mem::transmute_copy(&v.slice::<0, 2>().splat_2()),
+        //             3 => return std::mem::transmute_copy(&v.slice::<0, 3>().splat_3()),
+        //             _ => (),
+        //         }
+        //     }
+        // }
+        self.map(Simd::splat)
     }
+
+    /*
+    pub fn splat<const LANES: usize>(self) -> Mat<Simd<T, LANES>, M, N>
+    where
+        LaneCount<LANES>: SupportedLaneCount,
+        T: SimdElement,
+    {
+        struct FnArr<T, const N: usize, const LANES: usize>([T; N])
+        where
+            LaneCount<LANES>: SupportedLaneCount,
+            T: SimdElement;
+
+        impl<T, const N: usize, const LANES: usize> detail::ConstFn for FnArr<T, N, LANES>
+        where
+            LaneCount<LANES>: SupportedLaneCount,
+            T: SimdElement,
+        {
+            type Output = Simd<T, LANES>;
+
+            #[inline(always)]
+            fn call<const I: usize>(&mut self) -> Self::Output {
+                Simd::splat(self.0[I])
+            }
+
+            #[inline(always)]
+            fn call_runtime(&mut self, i: usize) -> Self::Output {
+                Simd::splat(self.0[i])
+            }
+        }
+
+        struct FnMat<T, const M: usize, const N: usize, const LANES: usize>(Mat<T, M, N>)
+        where
+            LaneCount<LANES>: SupportedLaneCount,
+            T: SimdElement;
+
+        impl<T, const M: usize, const N: usize, const LANES: usize> detail::ConstFn
+            for FnMat<T, M, N, LANES>
+        where
+            LaneCount<LANES>: SupportedLaneCount,
+            T: SimdElement,
+        {
+            type Output = [Simd<T, LANES>; N];
+
+            #[inline(always)]
+            fn call<const I: usize>(&mut self) -> Self::Output {
+                detail::array_from_fn(FnArr(self.0 .0[I]))
+            }
+
+            #[inline(always)]
+            fn call_runtime(&mut self, i: usize) -> Self::Output {
+                detail::array_from_fn(FnArr(self.0 .0[i]))
+            }
+        }
+
+        Mat(detail::array_from_fn(FnMat(self)))
+    }
+    */
 
     pub fn transpose(self) -> Mat<T, N, M> {
         use std::array::from_fn;
@@ -134,20 +265,6 @@ impl<T: Num> Mat<T, 3, 3> {
         let [m00, m01, m02] = self.0[0];
         let [m10, m11, m12] = self.0[1];
         let [m20, m21, m22] = self.0[2];
-
-        /*
-        let col0 = Vec::from([m00, m10, m20]);
-        let col1 = Vec::from([m01, m11, m21]);
-        let col2 = Vec::from([m02, m12, m22]);
-        let [a00, a10, a20] = col1.cross(col2).to_array();
-        let [a01, a11, a21] = col2.cross(col0).to_array();
-        let [a02, a12, a22] = col0.cross(col1).to_array();
-        Self::from([
-            [a00, a01, a02], //
-            [a10, a11, a12],
-            [a20, a21, a22],
-        ])
-        */
 
         Self::from([
             [
@@ -512,10 +629,50 @@ impl<T: Float, const N: usize> Vec<T, N> {
     }
 }
 
+impl<T: Copy> Vec<T, 1> {
+    #[inline(always)]
+    pub fn splat_1<const LANES: usize>(self) -> Vec<Simd<T, LANES>, 1>
+    where
+        LaneCount<LANES>: SupportedLaneCount,
+        T: SimdElement,
+    {
+        Vec::from([Simd::splat(self.x)])
+    }
+}
+
+impl<T: Copy> Vec<T, 2> {
+    #[inline(always)]
+    pub fn map_2<U>(self, mut f: impl FnMut(T) -> U) -> Vec<U, 2> {
+        Vec::from([f(self.x), f(self.y)])
+    }
+
+    #[inline(always)]
+    pub fn splat_2<const LANES: usize>(self) -> Vec<Simd<T, LANES>, 2>
+    where
+        LaneCount<LANES>: SupportedLaneCount,
+        T: SimdElement,
+    {
+        Vec::from([Simd::splat(self.x), Simd::splat(self.y)])
+    }
+}
+
 impl<T: Copy> Vec<T, 3> {
     #[inline(always)]
     pub fn map_3<U>(self, mut f: impl FnMut(T) -> U) -> Vec<U, 3> {
         Vec::from([f(self.x), f(self.y), f(self.z)])
+    }
+
+    #[inline(always)]
+    pub fn splat_3<const LANES: usize>(self) -> Vec<Simd<T, LANES>, 3>
+    where
+        LaneCount<LANES>: SupportedLaneCount,
+        T: SimdElement,
+    {
+        Vec::from([
+            Simd::splat(self.x),
+            Simd::splat(self.y),
+            Simd::splat(self.z),
+        ])
     }
 }
 
@@ -1245,6 +1402,67 @@ macro_rules! impl_num_float_simd {
 }
 
 impl_num_float_simd!(f32, f64);
+
+macro_rules! const_fn {
+    ([$($capture_var:ident : $capture:expr),*] |$arg:ident| -> $ret:ty { $($body:tt)* }) => {
+        {
+            struct GeneratedFn {
+                $($capture_var,)*
+            }
+
+            impl ConstFn for GeneratedFn {
+                type Output = $ret;
+
+                #[inline(always)]
+                fn call<const I: usize>(&mut self) -> Self::Output {
+                    let $arg = I;
+                    let GeneratedFn { $($captured_var),* } = self;
+                    $($body)*
+                }
+
+                #[inline(always)]
+                fn call_runtime(&mut self, i: usize) -> Self::Output {
+                    let $arg = i;
+                    let GeneratedFn { $($captured_var),* } = self;
+                    $($body)*
+                }
+            }
+
+            GeneratedFn {
+                $($capture_var: $capture,)*
+            }
+        }
+    };
+}
+
+mod detail {
+    pub trait ConstFn {
+        type Output;
+
+        fn call<const I: usize>(&mut self) -> Self::Output;
+        fn call_runtime(&mut self, i: usize) -> Self::Output;
+    }
+
+    #[inline(always)]
+    pub fn array_from_fn<T, F, const N: usize>(mut f: F) -> [T; N]
+    where
+        F: ConstFn<Output = T>,
+    {
+        use crate::unroll_array;
+        use std::mem::transmute_copy;
+
+        unsafe {
+            match N {
+                0 => transmute_copy(&([] as [T; 0])),
+                1 => transmute_copy(&unroll_array!(I: usize = 0 => f.call::<I>())),
+                2 => transmute_copy(&unroll_array!(I: usize = 0, 1 => f.call::<I>())),
+                3 => transmute_copy(&unroll_array!(I: usize = 0, 1, 2 => f.call::<I>())),
+                4 => transmute_copy(&unroll_array!(I: usize = 0, 1, 2, 3 => f.call::<I>())),
+                _ => std::array::from_fn(|i| f.call_runtime(i)),
+            }
+        }
+    }
+}
 
 #[cfg(test)]
 mod test {

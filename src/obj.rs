@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{anyhow, Context, Result};
 
 use crate::vec::{self, Vec2, Vec3, Vec4};
 
@@ -35,8 +35,8 @@ pub struct Obj {
 
 impl Obj {
     pub fn load(path: &Path) -> Result<Obj> {
-        let obj = std::fs::read_to_string(path)
-            .with_context(|| anyhow!("failed to open {path:?}"))?;
+        let obj =
+            std::fs::read_to_string(path).with_context(|| anyhow!("failed to open {path:?}"))?;
         let root = path.parent().unwrap(); // we know it's a file name
         let mut verts = Vec::new();
         let mut normals = Vec::new();
@@ -48,22 +48,27 @@ impl Obj {
             let mut it = line.split_ascii_whitespace();
             match it.next() {
                 Some("v") => {
-                    let vec: Vec3 = parse_vertex_coords(it)
-                        .with_context(|| format!("failed to parse position vertex {linenum}:{path:?}"))?;
+                    let vec: Vec3 = parse_vertex_coords(it).with_context(|| {
+                        format!("failed to parse position vertex {linenum}:{path:?}")
+                    })?;
                     verts.push(Vec4::from([vec.x, vec.y, vec.z, 1.0]))
-                },
+                }
                 Some("vn") => normals.push({
-                    parse_vertex_coords(it)
-                        .with_context(|| format!("failed to parse normal vertex {linenum}:{path:?}"))?
+                    parse_vertex_coords(it).with_context(|| {
+                        format!("failed to parse normal vertex {linenum}:{path:?}")
+                    })?
                 }),
                 Some("vt") => uvs.push({
-                    parse_vertex_coords(it)
-                        .with_context(|| format!("failed to parse uv vertex at {linenum}:{path:?}"))?
+                    parse_vertex_coords(it).with_context(|| {
+                        format!("failed to parse uv vertex at {linenum}:{path:?}")
+                    })?
                 }),
-                Some("f") => parse_face_idxs(it, &mut tris)
-                    .with_context(|| format!("failed to parse face indices at {linenum}:{path:?}"))?,
+                Some("f") => parse_face_idxs(it, &mut tris).with_context(|| {
+                    format!("failed to parse face indices at {linenum}:{path:?}")
+                })?,
                 Some("mtllib") => {
-                    let fname = it.next()
+                    let fname = it
+                        .next()
                         .ok_or_else(|| anyhow!("expected .mtl file name at {linenum}:{path:?}"))?;
                     Material::load_lib(root.join(fname).as_ref(), &mut materials)?;
                 }
@@ -104,10 +109,15 @@ impl Obj {
     }
 
     pub fn iter_vertices<'a>(&'a self) -> impl Iterator<Item = Vertex> + 'a {
-        self.verts.iter()
+        self.verts
+            .iter()
             .zip(&self.normals)
             .zip(&self.uvs)
-            .map(|((&position, &normal), &uv)| Vertex { position, normal, uv })
+            .map(|((&position, &normal), &uv)| Vertex {
+                position,
+                normal,
+                uv,
+            })
     }
 
     pub fn compute_normals(&mut self) {
@@ -149,8 +159,12 @@ impl Obj {
     }
 }
 
-fn parse_vertex_coords<'a, const N: usize>(it: impl Iterator<Item = &'a str>) -> Result<vec::Vec<f32, N>> {
-    let v = it.map(|el| el.parse::<f32>()).collect::<Result<Vec<_>, _>>()?;
+fn parse_vertex_coords<'a, const N: usize>(
+    it: impl Iterator<Item = &'a str>,
+) -> Result<vec::Vec<f32, N>> {
+    let v = it
+        .map(|el| el.parse::<f32>())
+        .collect::<Result<Vec<_>, _>>()?;
     let arr: [f32; N] = v
         .try_into()
         .map_err(|_| anyhow!("expected {N} coordinates"))?;
@@ -158,9 +172,10 @@ fn parse_vertex_coords<'a, const N: usize>(it: impl Iterator<Item = &'a str>) ->
 }
 
 fn parse_face_idxs<'a>(it: impl Iterator<Item = &'a str>, v: &mut Vec<[Index; 3]>) -> Result<()> {
-    let idxs =
-        it.map(|el| {
-            let idxs = el.split('/')
+    let idxs = it
+        .map(|el| {
+            let idxs = el
+                .split('/')
                 .map(|idx| {
                     if idx.is_empty() {
                         Ok(None)
@@ -171,11 +186,32 @@ fn parse_face_idxs<'a>(it: impl Iterator<Item = &'a str>, v: &mut Vec<[Index; 3]
                 })
                 .collect::<Result<Vec<_>>>()?;
             let idxs = match &idxs[..] {
-                &[Some(position)] => Index { position, uv: 0      , normal: 0       },
-                &[Some(position), Some(uv)] => Index { position, uv, normal: 0       },
-                &[Some(position), Some(uv), Some(normal)] => Index { position, uv, normal },
-                &[Some(position), None, Some(normal)] => Index { position, uv: 0, normal },
-                arr => return Err(anyhow!("invalid number of face indices {}", arr.iter().filter(|el| el.is_some()).count())),
+                &[Some(position)] => Index {
+                    position,
+                    uv: 0,
+                    normal: 0,
+                },
+                &[Some(position), Some(uv)] => Index {
+                    position,
+                    uv,
+                    normal: 0,
+                },
+                &[Some(position), Some(uv), Some(normal)] => Index {
+                    position,
+                    uv,
+                    normal,
+                },
+                &[Some(position), None, Some(normal)] => Index {
+                    position,
+                    uv: 0,
+                    normal,
+                },
+                arr => {
+                    return Err(anyhow!(
+                        "invalid number of face indices {}",
+                        arr.iter().filter(|el| el.is_some()).count()
+                    ))
+                }
             };
             Ok(idxs)
         })
@@ -186,7 +222,7 @@ fn parse_face_idxs<'a>(it: impl Iterator<Item = &'a str>, v: &mut Vec<[Index; 3]
         4 => {
             v.push([idxs[0], idxs[1], idxs[2]]);
             v.push([idxs[0], idxs[2], idxs[3]]);
-        },
+        }
         n => return Err(anyhow!("invalid number of face vertices {n}")),
     }
     Ok(())
@@ -199,7 +235,8 @@ pub struct Material {
 
 impl Material {
     pub fn load_lib(path: &Path, materials: &mut Vec<Self>) -> Result<()> {
-        let contents = std::fs::read_to_string(path)?;
+        let contents =
+            std::fs::read_to_string(path).with_context(|| anyhow!("failed to open {path:?}"))?;
         let root = path.parent().unwrap(); // we know it's a file name
 
         let mut lines = contents.lines();
@@ -208,7 +245,9 @@ impl Material {
             let mut spaces = line.split_ascii_whitespace();
             match spaces.next() {
                 Some("newmtl") => {
-                    let name = spaces.next().ok_or_else(|| anyhow!("expected material name"))?;
+                    let name = spaces
+                        .next()
+                        .ok_or_else(|| anyhow!("expected material name"))?;
                     materials.push(parse_material(root, name.into(), &mut lines)?);
                 }
                 _ => continue,
@@ -218,7 +257,11 @@ impl Material {
     }
 }
 
-fn parse_material<'a>(root: &Path, name: String, lines: impl Iterator<Item = &'a str>) -> Result<Material> {
+fn parse_material<'a>(
+    root: &Path,
+    name: String,
+    lines: impl Iterator<Item = &'a str>,
+) -> Result<Material> {
     use std::collections::HashMap;
 
     let mut it = lines.peekable();
@@ -230,12 +273,15 @@ fn parse_material<'a>(root: &Path, name: String, lines: impl Iterator<Item = &'a
 
         match spaces.next() {
             None | Some("#" | "") => continue,
-            Some(s) => { attrs.insert(s, spaces.remainder().unwrap_or("")); }
+            Some(s) => {
+                attrs.insert(s, spaces.remainder().unwrap_or(""));
+            }
         }
     }
 
     let get_attr = |name: &str| -> Result<&str> {
-        Ok(*attrs.get(&name)
+        Ok(*attrs
+            .get(&name)
             .ok_or_else(|| anyhow!("required attribute material {name} not found"))?)
     };
 
@@ -244,10 +290,13 @@ fn parse_material<'a>(root: &Path, name: String, lines: impl Iterator<Item = &'a
         map_kd: {
             let fname = get_attr("map_Kd")?.trim();
             decode_image(root.join(fname).as_ref())?
-        }
+        },
     })
 }
 
 fn decode_image(path: &Path) -> Result<image::RgbaImage> {
-    Ok(image::io::Reader::open(path)?.decode()?.to_rgba8())
+    Ok(image::io::Reader::open(path)
+        .with_context(|| anyhow!("failed to open {path:?}"))?
+        .decode()?
+        .to_rgba8())
 }

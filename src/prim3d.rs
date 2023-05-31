@@ -1,7 +1,7 @@
 use std::simd::Simd;
 
 use crate::buf::{MatrixSliceMut, PixelBuf};
-use crate::vec::{Vec, Vec2i, Vec3};
+use crate::vec::{Vec, Vec2i, Vec3, Vec4};
 use crate::{Attributes, FragmentShader, ScreenPos, VertexBuf, VertexShader};
 
 /*
@@ -111,12 +111,31 @@ pub fn draw_triangles<B, V, S>(
     let pixels = pixels.as_slice_mut();
     let depth_buf = depth_buf.as_slice_mut();
 
+    // Coalesce the pixel layout to be [rrrrggggbbbbaaaa] repeating
+    {
+        assert_eq!(width % 4, 0, "width must be a multiple of 4");
+        assert!(pixels
+            .as_ptr()
+            .is_aligned_to(std::mem::align_of::<Vec<Simd<u8, 4>, 4>>()));
+        let pixels = unsafe {
+            let ptr = pixels.as_mut_ptr().cast::<Vec<Simd<u8, 4>, 4>>();
+            std::slice::from_raw_parts_mut(ptr, pixels.len() >> 2)
+        };
+        for el in pixels {
+            *el = el.simd_transpose_4();
+        }
+    }
+
     for &[v0, v1, v2] in tris {
         let (v2, v1, v0) = (v0, v1, v2);
 
-        let (attrs0, p0) = vert_shader.exec(vert.index(v0));
-        let (attrs1, p1) = vert_shader.exec(vert.index(v1));
-        let (attrs2, p2) = vert_shader.exec(vert.index(v2));
+        let attrs0 = vert_shader.exec(vert.index(v0));
+        let attrs1 = vert_shader.exec(vert.index(v1));
+        let attrs2 = vert_shader.exec(vert.index(v2));
+
+        let p0 = *attrs0.position();
+        let p1 = *attrs1.position();
+        let p2 = *attrs2.position();
 
         let inv_ws = [1. / p0.w, 1. / p1.w, 1. / p2.w];
 
@@ -206,6 +225,17 @@ pub fn draw_triangles<B, V, S>(
             row_start += stride * STEP_Y as usize;
         }
     }
+
+    // Restore to original pixel layout
+    {
+        let pixels = unsafe {
+            let ptr = pixels.as_mut_ptr().cast::<Vec<Simd<u8, 4>, 4>>();
+            std::slice::from_raw_parts_mut(ptr, pixels.len() >> 2)
+        };
+        for el in pixels {
+            *el = el.simd_transpose_4();
+        }
+    }
 }
 
 pub fn draw_triangles_depth<B, V>(
@@ -215,7 +245,7 @@ pub fn draw_triangles_depth<B, V>(
     depth_buf: MatrixSliceMut<f32>,
 ) where
     B: VertexBuf,
-    V: VertexShader<B::Vertex, Output = ()>,
+    V: VertexShader<B::Vertex, Output = Vec4>,
 {
     use std::simd::SimdPartialOrd;
 
@@ -246,9 +276,13 @@ pub fn draw_triangles_depth<B, V>(
     for &[v0, v1, v2] in tris {
         let (v2, v1, v0) = (v0, v1, v2);
 
-        let (_, p0) = vert_shader.exec(vert.index(v0));
-        let (_, p1) = vert_shader.exec(vert.index(v1));
-        let (_, p2) = vert_shader.exec(vert.index(v2));
+        let attr0 = vert_shader.exec(vert.index(v0));
+        let attr1 = vert_shader.exec(vert.index(v1));
+        let attr2 = vert_shader.exec(vert.index(v2));
+
+        let p0 = *attr0.position();
+        let p1 = *attr1.position();
+        let p2 = *attr2.position();
 
         let p0 = ndc_to_screen * (p0 / p0.w);
         let p1 = ndc_to_screen * (p1 / p1.w);
@@ -275,7 +309,7 @@ pub fn draw_triangles_depth<B, V>(
             u.x * v.y - u.y * v.x
         };
 
-        if tri_area <= 0 || nz >= 0.0 {
+        if tri_area <= 0 || nz >= 0.0 || min.x > max.x || min.y > max.y {
             continue;
         }
 
@@ -285,13 +319,17 @@ pub fn draw_triangles_depth<B, V>(
 
         let inv_area = Simd::splat(1.0 / tri_area as f32);
 
+        let bbox_width = (max.x - min.x + 1) as usize;
+
         let mut row_start = min.y as usize * stride + min.x as usize;
-        for _y in (min.y..=max.y).step_by(STEP_Y as usize) {
+        let end = max.y as usize * stride + min.x as usize;
+        while row_start < end {
             let mut w0 = w0_row;
             let mut w1 = w1_row;
             let mut w2 = w2_row;
             let mut idx = row_start;
-            for _x in (min.x..=max.x).step_by(STEP_X as usize) {
+            let row_end = idx + bbox_width;
+            while idx < row_end {
                 let mask = (w0 | w1 | w2).simd_ge(Simd::splat(0));
                 if mask.any() {
                     let w = Vec3xX::from([w0.cast::<f32>(), w1.cast::<f32>(), w2.cast::<f32>()])

@@ -1,10 +1,8 @@
-use std::simd::{
-    LaneCount, Mask, Simd, SimdFloat, SimdPartialEq, SimdPartialOrd, SupportedLaneCount,
-};
+use std::simd::{LaneCount, Mask, Simd, SimdFloat, SimdPartialOrd, SupportedLaneCount};
 
 use crate::{
     buf,
-    vec::{Mat4x4, Vec, Vec2, Vec3, Vec2xN, Vec3xN, Vec4, Vec4xN},
+    vec::{Mat4x4, Vec, Vec2, Vec2xN, Vec3, Vec3xN, Vec4, Vec4xN},
     Attributes, FragmentShader, Vertex, VertexShader,
 };
 
@@ -25,22 +23,22 @@ impl LitVertexShader {
 impl VertexShader<Vertex> for LitVertexShader {
     type Output = LitAttributes;
 
-    fn exec(&self, vertex: Vertex) -> (Self::Output, Vec4) {
+    fn exec(&self, vertex: Vertex) -> Self::Output {
         let shadow_clip = self.light_transform * vertex.position;
         let shadow_ndc = shadow_clip / shadow_clip.w;
-        (
-            LitAttributes {
-                normal: vertex.normal,
-                frag_position: vertex.position,
-                uv: vertex.uv,
-                shadow_ndc: shadow_ndc.xyz(),
-            },
-            self.transform * vertex.position,
-        )
+
+        LitAttributes {
+            position_ndc: self.transform * vertex.position,
+            normal: vertex.normal,
+            frag_position: vertex.position,
+            uv: vertex.uv,
+            shadow_ndc: shadow_ndc.xyz(),
+        }
     }
 }
 
 pub struct LitAttributes {
+    pub position_ndc: Vec4,
     pub normal: Vec3,
     pub frag_position: Vec4,
     pub uv: Vec2,
@@ -94,6 +92,10 @@ impl Attributes for LitAttributes {
                 + w.z * p2.shadow_ndc.splat(),
         }
     }
+
+    fn position(&self) -> &Vec4 {
+        &self.position_ndc
+    }
 }
 
 pub struct LitFragmentShader<'a> {
@@ -146,9 +148,13 @@ impl<'a> FragmentShader for LitFragmentShader<'a> {
         let bias = 5. * bias_unit;
 
         let lit_mask = {
-            let shadow_uv = attrs.shadow_ndc.xy() * Simd::splat(0.5) + Vec::from([0.5, 0.5]).splat();
+            let shadow_uv =
+                attrs.shadow_ndc.xy() * Simd::splat(0.5) + Vec::from([0.5, 0.5]).splat();
             let shadow_map = self.shadow_map.channel1();
-            let light_depth = shadow_map.index_uv_or(shadow_uv, Mask::from([true; LANES]), Simd::splat(f32::MIN)).x + Simd::splat(bias);
+            let light_depth = shadow_map
+                .index_uv_or(shadow_uv, Mask::from([true; LANES]), Simd::splat(f32::MIN))
+                .x
+                + Simd::splat(bias);
             attrs.shadow_ndc.z.simd_le(light_depth)
         };
 
@@ -172,7 +178,8 @@ impl<'a> FragmentShader for LitFragmentShader<'a> {
         let texture_color = self.texture.texture_idx(attrs.uv, mask);
 
         let color = (ambient.splat()
-            + (diffuse + specular).map_3(|el| lit_mask.select(el, Simd::splat(0.0)))).element_mul(texture_color.xyz());
+            + (diffuse + specular).map_3(|el| lit_mask.select(el, Simd::splat(0.0))))
+        .element_mul(texture_color.xyz());
 
         Vec4xN::from([color.x, color.y, color.z, Simd::splat(1.)])
     }
@@ -224,7 +231,12 @@ impl FragmentShader for DebugLightIntensity {
         };
 
         // Vec4xN::from([specular_intensity, specular_intensity, specular_intensity, Simd::splat(1.)])
-        Vec4xN::from([diffuse_intensity, diffuse_intensity, diffuse_intensity, Simd::splat(1.)])
+        Vec4xN::from([
+            diffuse_intensity,
+            diffuse_intensity,
+            diffuse_intensity,
+            Simd::splat(1.),
+        ])
         // Vec4xN::from([specular_intensity, diffuse_intensity, Simd::splat(0.), Simd::splat(1.)])
     }
 }

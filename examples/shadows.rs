@@ -3,7 +3,7 @@
 use pixels::{Pixels, SurfaceTexture};
 use winit::{
     dpi::{LogicalSize, PhysicalPosition},
-    event::{ElementState, Event, KeyboardInput, VirtualKeyCode, WindowEvent, DeviceEvent},
+    event::{DeviceEvent, ElementState, Event, KeyboardInput, VirtualKeyCode, WindowEvent},
     event_loop::EventLoop,
     window::{CursorGrabMode, WindowBuilder},
 };
@@ -11,11 +11,11 @@ use winit::{
 use std::time::{Duration, Instant};
 
 use rasterization::{
-    buf,
-    clear_color,
+    buf, clear_color,
     obj::Obj,
     prim3d, shaders,
-    vec::{Mat3x3, Mat4x4, Vec2, Vec3},
+    utils::{Camera, FpvCamera},
+    vec::{Mat4x4, Vec2, Vec3},
     VertBuf, Vertex,
 };
 
@@ -118,12 +118,13 @@ impl World {
             prim3d::draw_triangles_depth(
                 &vert_buf,
                 &self.obj.tris,
-                &|vertex: Vertex| ((), light_transform * vertex.position),
+                &|vertex: Vertex| light_transform * vertex.position,
                 shadow_buf.borrow(),
             );
             // Pretty dumb way to make a circular spotlight
             let radius = shadow_buf.width as f32 * 0.5;
-            let circle_center = Vec2::from([shadow_buf.width as f32 / 2., shadow_buf.height as f32 / 2.]);
+            let circle_center =
+                Vec2::from([shadow_buf.width as f32 / 2., shadow_buf.height as f32 / 2.]);
             for y in 0..shadow_buf.height {
                 for x in 0..shadow_buf.width {
                     let p = Vec2::from([x as f32, y as f32]);
@@ -146,7 +147,11 @@ impl World {
         );
         let texture = &self.obj.materials[0].map_kd;
         let (texture_pixels, _) = texture.as_chunks::<4>();
-        let texture = buf::MatrixSlice::new(texture_pixels, texture.width() as usize, texture.height() as usize);
+        let texture = buf::MatrixSlice::new(
+            texture_pixels,
+            texture.width() as usize,
+            texture.height() as usize,
+        );
         let frag_shader = shaders::lit::LitFragmentShader::new(
             self.camera.position,
             model,
@@ -190,145 +195,6 @@ impl World {
     }
 }
 
-pub struct FpvCamera {
-    pub position: Vec3,
-    pub up: Vec3,
-    /// Pitch measured in degrees
-    pub pitch: f32,
-    /// Yaw measured in degrees
-    pub yaw: f32,
-    pub sensitivity: f32,
-    pub speed: f32,
-    pub fovy: f32,
-    pub ratio: f32,
-}
-
-impl FpvCamera {
-    /// Rotate the camera by some delta in pitch and yaw, measured in degrees.
-    pub fn rotate_delta(&mut self, delta_pitch: f32, delta_yaw: f32) {
-        self.pitch -= delta_pitch * self.sensitivity;
-        self.pitch = self.pitch.clamp(-90., 90.);
-        self.yaw -= delta_yaw * self.sensitivity;
-    }
-
-    /// Move the camera by `axis`. The vector `axis` has coordinates `x` for sideways motion
-    /// (positive goes to the right), `y` for going forward and backwards (positive goes forward)
-    /// and `z` for going up and down (positive goes up).
-    pub fn move_delta(&mut self, axis: Vec3) {
-        self.position += self.change_of_basis() * (self.speed * axis);
-    }
-
-    pub fn right(&self) -> Vec3 {
-        self.front().cross(self.up).normalized()
-    }
-
-    pub fn up(&self) -> Vec3 {
-        self.right().cross(self.front())
-    }
-
-    pub fn front(&self) -> Vec3 {
-        /*
-        let yaw = self.yaw.to_radians();
-        let pitch = -self.pitch.to_radians();
-        Vec3::from([
-            yaw.cos() * pitch.cos(),
-            pitch.sin(),
-            yaw.sin() * pitch.cos(),
-        ])
-        */
-        let yaw = -self.yaw.to_radians();
-        let pitch = self.pitch.to_radians();
-        Vec3::from([
-            pitch.sin() * yaw.sin(),
-            pitch.sin() * yaw.cos(),
-            -pitch.cos(),
-        ])
-    }
-
-    pub fn view_matrix(&self) -> Mat4x4 {
-        Mat4x4::look_at(self.position, self.position + self.front(), self.up)
-    }
-
-    pub fn projection_matrix(&self, near: f32, far: f32) -> Mat4x4 {
-        Mat4x4::perspective(self.ratio, self.fovy, near, far)
-    }
-
-    pub fn transform_matrix(&self, near: f32, far: f32) -> Mat4x4 {
-        self.projection_matrix(near, far) * self.view_matrix()
-    }
-
-    // Change of basis matrix that allows changing from a vector in "camera" space, to world space.
-    // Camera space has x coordinates going to the right, y coordinates going forward and z coordinates
-    // going up.
-    fn change_of_basis(&self) -> Mat3x3 {
-        let front = self.front();
-        let right = front.cross(self.up).normalized();
-        let up = right.cross(front);
-        Mat3x3::from([
-            [right.x, front.x, up.x],
-            [right.y, front.y, up.y],
-            [right.z, front.z, up.z],
-        ])
-    }
-}
-
-pub struct Camera {
-    pub position: Vec3,
-    pub target: Vec3,
-    pub up: Vec3,
-    pub fovy: f32,
-    pub ratio: f32,
-    pub near: f32,
-    pub far: f32,
-}
-
-impl Camera {
-    pub fn from_blender(
-        position: Vec3,
-        rotation_deg: Vec3,
-        fovy: f32,
-        ratio: f32,
-        near: f32,
-        far: f32,
-    ) -> Self {
-        let up = Vec3::from([0., 0., 1.]);
-        let rotation = rotation_deg.map(|el| el.to_radians());
-        Camera {
-            position,
-            target: position + (rotation.to_rotation() * (-up).to_hom()).xyz(),
-            up,
-            fovy,
-            ratio,
-            near,
-            far,
-        }
-    }
-
-    pub fn view_matrix(&self) -> Mat4x4 {
-        Mat4x4::look_at(self.position, self.target, self.up)
-    }
-
-    pub fn projection_matrix(&self) -> Mat4x4 {
-        Mat4x4::perspective(self.ratio, self.fovy, self.near, self.far)
-    }
-
-    pub fn transform_matrix(&self) -> Mat4x4 {
-        self.projection_matrix() * self.view_matrix()
-    }
-
-    pub fn right(&self) -> Vec3 {
-        self.front().cross(self.up).normalized()
-    }
-
-    pub fn up(&self) -> Vec3 {
-        self.right().cross(self.front())
-    }
-
-    pub fn front(&self) -> Vec3 {
-        (self.target - self.position).normalized()
-    }
-}
-
 // const WIDTH: u32 = 480;
 // const HEIGHT: u32 = 480;
 
@@ -359,10 +225,13 @@ fn main() {
 
         if window.has_focus() {
             window
-                .set_cursor_grab(CursorGrabMode::Confined)
+                .set_cursor_grab(CursorGrabMode::Locked)
+                .or_else(|_| window.set_cursor_grab(CursorGrabMode::Confined))
                 .unwrap();
             window.set_cursor_visible(false);
-            window.set_cursor_position(PhysicalPosition::new(wsize.width / 2, wsize.height / 2)).unwrap();
+            window
+                .set_cursor_position(PhysicalPosition::new(wsize.width / 2, wsize.height / 2))
+                .unwrap();
         } else {
             window.set_cursor_grab(CursorGrabMode::None).unwrap();
             window.set_cursor_visible(true);
