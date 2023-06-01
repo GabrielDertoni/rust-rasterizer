@@ -29,8 +29,10 @@ impl VertexShader<Vertex> for TexturedVertexShader {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
+// #[derive(Attributes)]
 pub struct TexturedAttributes {
+    // #[position]
     pub position_ndc: Vec4,
     pub uv: Vec2,
 }
@@ -72,6 +74,10 @@ impl Attributes for TexturedAttributes {
 
     fn position(&self) -> &Vec4 {
         &self.position_ndc
+    }
+
+    fn position_mut(&mut self) -> &mut Vec4 {
+        &mut self.position_ndc
     }
 }
 

@@ -177,6 +177,15 @@ impl<const M: usize, const N: usize> Mat<i32, M, N> {
     }
 }
 
+impl<const M: usize, const N: usize, const LANES: usize> Mat<Simd<i32, LANES>, M, N>
+where
+    LaneCount<LANES>: SupportedLaneCount,
+{
+    pub fn to_f32(self) -> Mat<Simd<f32, LANES>, M, N> {
+        self.map(|el| el.cast())
+    }
+}
+
 impl<T: Num> Mat<T, 3, 3> {
     // source: https://www.cuemath.com/algebra/inverse-of-3x3-matrix/
     pub fn inverse(&self) -> Self {
@@ -988,6 +997,11 @@ mod swizzling {
 
     impl<T: Copy> X<T> {
         #[inline(always)]
+        pub fn x_mut(&mut self) -> &mut Vec<T, 1> {
+            unsafe { std::mem::transmute(self) }
+        }
+
+        #[inline(always)]
         pub fn x(&self) -> Vec<T, 1> {
             Vec::from([self.x])
         }
@@ -1001,6 +1015,11 @@ mod swizzling {
     }
 
     impl<T: Copy> XY<T> {
+        #[inline(always)]
+        pub fn xy_mut(&mut self) -> &mut Vec<T, 2> {
+            unsafe { std::mem::transmute(self) }
+        }
+
         #[inline(always)]
         pub fn xy(&self) -> Vec<T, 2> {
             Vec::from([self.x, self.y])
@@ -1034,6 +1053,11 @@ mod swizzling {
     }
 
     impl<T: Copy> XYZ<T> {
+        #[inline(always)]
+        pub fn xyz_mut(&mut self) -> &mut Vec<T, 3> {
+            unsafe { std::mem::transmute(self) }
+        }
+
         #[inline(always)]
         pub fn xyz(&self) -> Vec<T, 3> {
             Vec::from([self.x, self.y, self.z])
@@ -1084,6 +1108,13 @@ mod swizzling {
     pub struct XYZW<T> {
         _xyz: XYZ<T>,
         pub w: T,
+    }
+
+    impl<T> XYZW<T> {
+        #[inline(always)]
+        pub fn xyzw_mut(&mut self) -> &mut Vec<T, 4> {
+            unsafe { std::mem::transmute(self) }
+        }
     }
 
     impl<T> Deref for XYZW<T> {

@@ -126,7 +126,7 @@ impl World {
     }
 
     fn render_without_shadows(&mut self, pixels: buf::PixelBuf) {
-        let depth_buf = buf::MatrixSliceMut::new(
+        let mut depth_buf = buf::MatrixSliceMut::new(
             &mut self.depth_buf,
             self.width as usize,
             self.height as usize,
@@ -137,7 +137,9 @@ impl World {
         let near = 0.1;
         let far = 100.;
 
-        let vert_shader = shaders::textured::TexturedVertexShader::new(self.camera.transform_matrix(near, far));
+        let camera_transform = self.camera.transform_matrix(near, far);
+
+        let vert_shader = shaders::textured::TexturedVertexShader::new(camera_transform);
         let texture = &self.materials[0].map_kd;
         let (texture_pixels, _) = texture.as_chunks::<4>();
         let texture = buf::MatrixSlice::new(
@@ -146,6 +148,16 @@ impl World {
             texture.height() as usize,
         );
         let frag_shader = shaders::textured::TexturedFragmentShader::new(texture);
+
+        let depth_start = Instant::now();
+        prim3d::draw_triangles_depth(
+            &self.vert_buf,
+            &self.index_buf,
+            &|vertex: Vertex| camera_transform * vertex.position,
+            depth_buf.borrow(),
+            &mut self.render_ctx,
+        );
+        println!("Rendering depth took {:?}", depth_start.elapsed());
 
         prim3d::draw_triangles(
             &self.vert_buf,
@@ -183,6 +195,7 @@ impl World {
                 &self.index_buf,
                 &|vertex: Vertex| light_transform * vertex.position,
                 shadow_buf.borrow(),
+                &mut self.render_ctx,
             );
             // Pretty dumb way to make a circular spotlight
             let radius = shadow_buf.width as f32 * 0.5;

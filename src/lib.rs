@@ -185,6 +185,10 @@ impl Attributes for Vertex {
     fn position(&self) -> &Vec4 {
         &self.position
     }
+
+    fn position_mut(&mut self) -> &mut Vec4 {
+        &mut self.position
+    }
 }
 
 pub trait FragmentShader {
@@ -271,6 +275,7 @@ pub trait Attributes: Sized {
         LaneCount<LANES>: SupportedLaneCount;
 
     fn position(&self) -> &Vec4;
+    fn position_mut(&mut self) -> &mut Vec4;
 }
 
 impl Attributes for Vec4 {
@@ -300,6 +305,10 @@ impl Attributes for Vec4 {
     }
 
     fn position(&self) -> &Vec4 {
+        self
+    }
+
+    fn position_mut(&mut self) -> &mut Vec4 {
         self
     }
 }

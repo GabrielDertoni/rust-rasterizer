@@ -36,7 +36,7 @@ impl crate::VertexShader<Vertex> for LitVertexShader {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct LitAttributes {
     pub position_ndc: Vec4,
     pub normal: Vec3,
@@ -95,6 +95,10 @@ impl crate::Attributes for LitAttributes {
 
     fn position(&self) -> &Vec4 {
         &self.position_ndc
+    }
+
+    fn position_mut(&mut self) -> &mut Vec4 {
+        &mut self.position_ndc
     }
 }
 
@@ -315,7 +319,7 @@ pub mod gouraud {
         }
     }
 
-    #[derive(Clone, Copy)]
+    #[derive(Clone, Copy, Debug)]
     pub struct Attributes {
         pub position_ndc: Vec4,
         pub light: Vec3,
@@ -370,6 +374,10 @@ pub mod gouraud {
 
         fn position(&self) -> &Vec4 {
             &self.position_ndc
+        }
+
+        fn position_mut(&mut self) -> &mut Vec4 {
+            &mut self.position_ndc
         }
     }
 
