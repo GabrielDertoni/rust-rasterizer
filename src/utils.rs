@@ -37,7 +37,7 @@ impl FpvCamera {
     /// Rotate the camera by some delta in pitch and yaw, measured in degrees.
     pub fn rotate_delta(&mut self, delta_pitch: f32, delta_yaw: f32) {
         self.pitch -= delta_pitch * self.sensitivity;
-        self.pitch = self.pitch.clamp(-90., 90.);
+        self.pitch = self.pitch.clamp(0., 180.);
         self.yaw -= delta_yaw * self.sensitivity;
     }
 

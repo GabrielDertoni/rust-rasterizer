@@ -16,7 +16,7 @@ pub struct Vertex {
     pub uv: Vec2,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Index {
     pub position: u32,
     pub normal: u32,

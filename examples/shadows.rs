@@ -12,15 +12,17 @@ use std::time::{Duration, Instant};
 
 use rasterization::{
     buf, clear_color,
-    obj::Obj,
+    obj::{Obj, Material},
     prim3d, shaders,
     utils::{Camera, FpvCamera},
     vec::{Mat4x4, Vec2, Vec3},
-    VertBuf, Vertex,
+    VertexBuf, VertBuf, Vertex,
 };
 
 pub struct World {
-    obj: Obj,
+    vert_buf: VertBuf,
+    index_buf: Vec<[usize; 3]>,
+    materials: Vec<Material>,
     depth_buf: Vec<f32>,
     shadow_map: Vec<f32>,
     camera: FpvCamera,
@@ -31,6 +33,7 @@ pub struct World {
     use_filter: bool,
     pub axis: Vec3,
     pub enable_logging: bool,
+    render_ctx: prim3d::RenderContext,
     width: u32,
     height: u32,
 }
@@ -42,9 +45,32 @@ impl World {
             obj.compute_normals();
         }
 
+        let mut vert_idxs_set = obj.tris.iter().copied().flatten().collect::<Vec<_>>();
+        vert_idxs_set.sort_unstable();
+        vert_idxs_set.dedup();
+        let mut vert_buf = VertBuf::with_capacity(vert_idxs_set.len());
+
+        for idxs in &vert_idxs_set {
+            vert_buf.push(Vertex {
+                position: obj.verts[idxs.position as usize],
+                normal: obj.normals[idxs.normal as usize],
+                uv: obj.uvs[idxs.uv as usize],
+            });
+        }
+
+        let mut index_buf = Vec::with_capacity(obj.tris.len());
+        for tri in &obj.tris {
+            index_buf.push(tri.map(|v| vert_idxs_set.binary_search(&v).unwrap()));
+        }
+
+        println!("Initially had {} positions, {} normals and {} uvs. Now converted into {} distict vertices", obj.verts.len(), obj.normals.len(), obj.uvs.len(), vert_buf.len());
+
+        let n_vertices = vert_buf.len();
         let ratio = width as f32 / height as f32;
         World {
-            obj,
+            vert_buf,
+            index_buf,
+            materials: obj.materials,
             depth_buf: vec![0.0; (width * height) as usize],
             shadow_map: vec![0.0; (width * height) as usize],
             camera: FpvCamera {
@@ -64,6 +90,7 @@ impl World {
             use_filter: false,
             axis: Vec3::zero(),
             enable_logging: true,
+            render_ctx: prim3d::RenderContext::alloc(n_vertices),
             width,
             height,
         }
@@ -92,14 +119,6 @@ impl World {
             * Mat4x4::rotation_x(self.theta)
             * Vec3::repeat(1.0 / self.scale).to_scale();
 
-        let positions: Vec<_> = self.obj.verts.iter().map(|&p| model * p).collect();
-
-        let vert_buf = VertBuf {
-            positions: &positions,
-            normals: &self.obj.normals,
-            uvs: &self.obj.uvs,
-        };
-
         let draw_timer = Instant::now();
 
         let light_pos = Vec3::from([0., -3.77, 6.27]);
@@ -116,8 +135,8 @@ impl World {
 
             let light_transform = light_camera.transform_matrix();
             prim3d::draw_triangles_depth(
-                &vert_buf,
-                &self.obj.tris,
+                &self.vert_buf,
+                &self.index_buf,
                 &|vertex: Vertex| light_transform * vertex.position,
                 shadow_buf.borrow(),
             );
@@ -145,7 +164,7 @@ impl World {
             self.camera.transform_matrix(near, far),
             light_camera.transform_matrix(),
         );
-        let texture = &self.obj.materials[0].map_kd;
+        let texture = &self.materials[0].map_kd;
         let (texture_pixels, _) = texture.as_chunks::<4>();
         let texture = buf::MatrixSlice::new(
             texture_pixels,
@@ -162,15 +181,19 @@ impl World {
         );
 
         prim3d::draw_triangles(
-            &vert_buf,
-            &self.obj.tris,
+            &self.vert_buf,
+            &self.index_buf,
             &vert_shader,
             &frag_shader,
             pixels.borrow(),
             depth_buf.borrow(),
+            &mut self.render_ctx,
         );
 
         if self.enable_logging {
+            let mid_depth = depth_buf[(depth_buf.width / 2, depth_buf.height / 2)];
+            println!("mid depth: {mid_depth}");
+
             let draw_time = draw_timer.elapsed();
             println!("draw time: {draw_time:?}");
 

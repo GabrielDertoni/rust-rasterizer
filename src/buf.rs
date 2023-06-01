@@ -55,6 +55,10 @@ impl<'a, E> MatrixSlice<'a, E> {
     pub fn channel1(&self) -> MatrixSlice<'a, [E; 1]> {
         unsafe { std::mem::transmute_copy(self) }
     }
+
+    pub fn as_ptr(&self) -> *const E {
+        self.ptr as *const E
+    }
 }
 
 impl<'a, T, const N: usize> MatrixSlice<'a, [T; N]> {
@@ -302,7 +306,7 @@ where
     }
 }
 
-type Texture<'a> = MatrixSlice<'a, Pixel>;
+pub type Texture<'a> = MatrixSlice<'a, Pixel>;
 
 impl<'a> Texture<'a> {
     /*
@@ -471,6 +475,42 @@ impl<'a, E> MatrixSliceMut<'a, E> {
             height: end_row - start_row,
             stride: self.stride,
             ptr: unsafe { self.ptr.add(start_row * self.stride + start_col) },
+            _marker: PhantomData,
+        }
+    }
+
+    pub fn as_ptr(&self) -> *const E {
+        self.ptr as *const E
+    }
+
+    pub fn as_mut_ptr(&self) -> *mut E {
+        self.ptr
+    }
+
+    pub fn size(&self) -> usize {
+        self.width * self.height
+    }
+
+    /// Casts the inner pointer from one type to another
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that both types can be cast from one to the other, meaning
+    /// they have compatible bit representations. It is not unsafe to call this function
+    /// with types of different sizes or alignments, but the function will panic.
+    ///
+    /// # Panics
+    ///
+    /// If `E` and `U` have different sizes or the pointer isn't aligned, the function will panic.
+    ///
+    pub unsafe fn cast<U>(self) -> MatrixSliceMut<'a, U> {
+        assert_eq!(std::mem::size_of::<U>(), std::mem::size_of::<E>());
+        assert!(self.ptr.is_aligned_to(std::mem::align_of::<U>()));
+        MatrixSliceMut {
+            width: self.width,
+            height: self.height,
+            stride: self.stride,
+            ptr: self.ptr.cast(),
             _marker: PhantomData,
         }
     }
