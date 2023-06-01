@@ -1334,38 +1334,6 @@ macro_rules! impl_num_float_simd {
 
 impl_num_float_simd!(f32, f64);
 
-macro_rules! const_fn {
-    ([$($capture_var:ident : $capture:expr),*] |$arg:ident| -> $ret:ty { $($body:tt)* }) => {
-        {
-            struct GeneratedFn {
-                $($capture_var,)*
-            }
-
-            impl ConstFn for GeneratedFn {
-                type Output = $ret;
-
-                #[inline(always)]
-                fn call<const I: usize>(&mut self) -> Self::Output {
-                    let $arg = I;
-                    let GeneratedFn { $($captured_var),* } = self;
-                    $($body)*
-                }
-
-                #[inline(always)]
-                fn call_runtime(&mut self, i: usize) -> Self::Output {
-                    let $arg = i;
-                    let GeneratedFn { $($captured_var),* } = self;
-                    $($body)*
-                }
-            }
-
-            GeneratedFn {
-                $($capture_var: $capture,)*
-            }
-        }
-    };
-}
-
 mod detail {
     pub trait ConstFn {
         type Output;

@@ -4,7 +4,7 @@ use crate::{
     Vertex, VertexShader, Attributes, FragmentShader,
 };
 
-use std::simd::{LaneCount, Mask, Simd, SupportedLaneCount};
+use std::simd::{LaneCount, Mask, Simd, SupportedLaneCount, SimdPartialEq};
 
 pub struct TexturedVertexShader {
     transform: Mat4x4,
@@ -29,6 +29,7 @@ impl VertexShader<Vertex> for TexturedVertexShader {
     }
 }
 
+#[derive(Clone, Copy)]
 pub struct TexturedAttributes {
     pub position_ndc: Vec4,
     pub uv: Vec2,
@@ -107,14 +108,20 @@ impl<'a> FragmentShader for TexturedFragmentShader<'a> {
     #[inline(always)]
     fn exec_specialized(
         &self,
-        mask: Mask<i32, 4>,
+        mask: &mut Mask<i32, 4>,
         attrs: Self::SimdAttr<4>,
         _pixel_coords: Vec<Simd<i32, 4>, 2>,
         pixels: &mut Simd<u32, 4>,
     ) {
-        let colors = self.texture.index_uv(attrs.uv, mask);
-
+        let colors = self.texture.index_uv(attrs.uv, *mask);
         let colors = Simd::from(colors.map(|el| u32::from_ne_bytes(el.to_array())).to_array());
+
+        // Will be 1s where the pixel is visible
+        let alpha = colors.as_array()[3];
+        let alpha_mask = Simd::from_array(alpha.to_ne_bytes()).simd_eq(Simd::splat(0xff));
+
+        // Update the original mask to not update the depth buffer when we hit a transparent pixel
+        *mask &= alpha_mask.cast();
 
         let mask = mask.cast::<i8>();
         let mask = Simd::splat(u32::from_ne_bytes(mask.to_int().cast().to_array()));

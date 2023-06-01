@@ -37,6 +37,7 @@ impl VertexShader<Vertex> for LitVertexShader {
     }
 }
 
+#[derive(Clone, Copy)]
 pub struct LitAttributes {
     pub position_ndc: Vec4,
     pub normal: Vec3,
@@ -147,11 +148,13 @@ impl<'a> FragmentShader for LitFragmentShader<'a> {
 
     fn exec_specialized(
         &self,
-        mask: Mask<i32, 4>,
+        mask: &mut Mask<i32, 4>,
         attrs: Self::SimdAttr<4>,
         _pixel_coords: Vec<Simd<i32, 4>, 2>,
         pixels: &mut Simd<u32, 4>,
     ) {
+        let mask = *mask;
+
         let normal = (self.normal_local_to_world.splat() * attrs.normal.to_hom()).xyz();
 
         let bias_unit = 1. / self.shadow_map.width as f32;

@@ -23,7 +23,6 @@ pub type Pixel = [u8; 4];
 
 use std::simd::{LaneCount, Mask, Simd, SupportedLaneCount};
 
-use obj::Index;
 use vec::{Mat4x4, Vec, Vec2, Vec3, Vec4, Vec4xN};
 
 pub fn triangles_iter<'a, V>(
@@ -50,30 +49,78 @@ where
 }
 
 #[derive(Clone, Copy)]
-pub struct VertBuf<'a> {
-    pub positions: &'a [Vec4],
-    pub normals: &'a [Vec3],
-    pub uvs: &'a [Vec2],
-}
-
-#[derive(Clone, Copy)]
 pub struct Vertex {
     pub position: Vec4,
     pub normal: Vec3,
     pub uv: Vec2,
 }
 
-impl<'a> VertexBuf for VertBuf<'a> {
-    type Index = Index;
+/// INVARIANT: The length of all fields is the same
+#[derive(Clone, Default)]
+pub struct VertBuf {
+    pub positions: std::vec::Vec<Vec4>,
+    pub normals: std::vec::Vec<Vec3>,
+    pub uvs: std::vec::Vec<Vec2>,
+}
+
+impl VertBuf {
+    pub fn with_capacity(cap: usize) -> Self {
+        VertBuf {
+            positions: std::vec::Vec::with_capacity(cap),
+            normals: std::vec::Vec::with_capacity(cap),
+            uvs: std::vec::Vec::with_capacity(cap),
+        }
+    }
+
+    pub fn push(&mut self, vertex: Vertex) {
+        self.positions.push(vertex.position);
+        self.normals.push(vertex.normal);
+        self.uvs.push(vertex.uv);
+    }
+}
+
+impl VertexBuf for VertBuf {
+    type Vertex = Vertex;
+
+    fn index(&self, index: usize) -> Vertex {
+        Vertex {
+            position: self.positions[index],
+            normal: self.normals[index],
+            uv: self.uvs[index],
+        }
+    }
+
+    fn len(&self) -> usize {
+        debug_assert_eq!(self.positions.len(), self.normals.len());
+        debug_assert_eq!(self.positions.len(), self.uvs.len());
+        self.positions.len()
+    }
+}
+
+/// INVARIANT: The length of all fields is the same
+#[derive(Clone, Copy)]
+pub struct VertBufSlice<'a> {
+    pub positions: &'a [Vec4],
+    pub normals: &'a [Vec3],
+    pub uvs: &'a [Vec2],
+}
+
+impl<'a> VertexBuf for VertBufSlice<'a> {
     type Vertex = Vertex;
 
     #[inline(always)]
-    fn index(&self, index: Self::Index) -> Self::Vertex {
+    fn index(&self, index: usize) -> Vertex {
         Vertex {
-            position: self.positions[index.position as usize],
-            normal: self.normals[index.normal as usize],
-            uv: self.uvs[index.uv as usize],
+            position: self.positions[index],
+            normal: self.normals[index],
+            uv: self.uvs[index],
         }
+    }
+
+    fn len(&self) -> usize {
+        debug_assert_eq!(self.positions.len(), self.normals.len());
+        debug_assert_eq!(self.positions.len(), self.uvs.len());
+        self.positions.len()
     }
 }
 
@@ -156,7 +203,7 @@ pub trait FragmentShader {
 
     fn exec_specialized(
         &self,
-        mask: Mask<i32, 4>,
+        mask: &mut Mask<i32, 4>,
         attrs: Self::SimdAttr<4>,
         pixel_coords: Vec<Simd<i32, 4>, 2>,
         pixels: &mut Simd<u32, 4>,
@@ -164,7 +211,7 @@ pub trait FragmentShader {
         use std::simd::SimdFloat;
 
         let colors = Simd::from(
-            self.exec(mask, pixel_coords, attrs)
+            self.exec(*mask, pixel_coords, attrs)
                 .map(|el| {
                     u32::from_ne_bytes(
                         (el.simd_clamp(Simd::splat(0.0), Simd::splat(1.0)) * Simd::splat(255.0))
@@ -364,17 +411,20 @@ impl_attributes_tuple!(
 */
 
 pub trait VertexBuf {
-    type Index: Copy;
     type Vertex;
 
-    fn index(&self, index: Self::Index) -> Self::Vertex;
+    fn index(&self, index: usize) -> Self::Vertex;
+    fn len(&self) -> usize;
 }
 
 impl<V: Copy> VertexBuf for [V] {
-    type Index = usize;
     type Vertex = V;
 
-    fn index(&self, index: Self::Index) -> Self::Vertex {
+    fn index(&self, index: usize) -> Self::Vertex {
         self[index]
+    }
+
+    fn len(&self) -> usize {
+        self.len()
     }
 }

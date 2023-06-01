@@ -1,7 +1,7 @@
 use std::simd::{Simd, SimdPartialOrd};
 
 use crate::buf::{MatrixSliceMut, PixelBuf};
-use crate::vec::{Vec, Vec2i, Vec3, Vec4};
+use crate::vec::{Vec, Vec2i, Vec2, Vec3, Vec4};
 use crate::{Attributes, FragmentShader, ScreenPos, VertexBuf, VertexShader};
 
 /*
@@ -89,6 +89,31 @@ fn orient_2d_step(
     (inc, w)
 }
 
+fn ndc_to_screen(ndc: Vec2, width: f32, height: f32) -> Vec2 {
+    Vec2::from([
+        ndc.x * width  / 2. + width  / 2.,
+        -ndc.y * height / 2. + height / 2.,
+    ])
+}
+
+#[derive(Clone, Copy, Debug)]
+struct BBox<T> {
+    x: T,
+    y: T,
+    width: T,
+    height: T,
+}
+
+/*
+impl<T: Num> BBox<T> {
+    pub fn intersects(&self, other: BBox<T>) -> bool {
+        let x_intersection = (self.x + self.width).min(other.x + other.width) - self.x.max(other.x);
+        let y_intersection = (self.y + self.height).min(other.y + other.height) - self.y.max(other.y);
+        x_intersection > T::zero() && y_intersection > T::zero()
+    }
+}
+*/
+
 #[inline(always)]
 fn draw_triangle<VertOut, S>(
     v0: VertOut,
@@ -99,12 +124,12 @@ fn draw_triangle<VertOut, S>(
     // TODO: Maybe these could be `MatrixSliceMut<Simd<u32, LANES>>`, since that's actually how they're used
     pixels: MatrixSliceMut<u32>,
     depth_buf: MatrixSliceMut<f32>,
+    aabb: BBox<i32>,
+    metrics: &mut Metrics,
 ) where
     VertOut: Attributes,
     S: FragmentShader<SimdAttr<4> = <VertOut as Attributes>::Simd<4>>,
 {
-    let ndc_to_screen = pixels.ndc_to_screen();
-
     let stride = pixels.stride;
     let width = pixels.width as i32;
     let height = pixels.height as i32;
@@ -123,32 +148,37 @@ fn draw_triangle<VertOut, S>(
 
     let ndc_zs = Vec3::from([p0_ndc.z, p1_ndc.z, p2_ndc.z]);
 
-    let p0_screen = ndc_to_screen * p0_ndc;
-    let p1_screen = ndc_to_screen * p1_ndc;
-    let p2_screen = ndc_to_screen * p2_ndc;
-
-    let p0i = p0_screen.xy().to_i32();
-    let p1i = p1_screen.xy().to_i32();
-    let p2i = p2_screen.xy().to_i32();
+    let p0i = ndc_to_screen(p0_ndc.xy(), width as f32, height as f32).to_i32();
+    let p1i = ndc_to_screen(p1_ndc.xy(), width as f32, height as f32).to_i32();
+    let p2i = ndc_to_screen(p2_ndc.xy(), width as f32, height as f32).to_i32();
 
     let mut min = p0i.min(p1i).min(p2i);
-    min.x = min.x.next_multiple_of(-(LANES as i32)).max(0);
-    min.y = min.y.max(0);
+    min.x = min.x.next_multiple_of(-(LANES as i32)).max(aabb.x);
+    min.y = min.y.max(aabb.y);
     let max = p0i
         .max(p1i)
         .max(p2i)
-        .min(Vec2i::from([width - STEP_X, height - STEP_Y]));
+        .min(Vec2i::from([aabb.x + aabb.width - STEP_X, aabb.y + aabb.height - STEP_Y]));
 
     // 2 times the area of the triangle
     let tri_area = orient_2d_i32(p0i, p1i, p2i);
 
     let nz = {
-        let u = p0_screen - p1_screen;
-        let v = p2_screen - p1_screen;
+        let u = p0i - p1i;
+        let v = p2i - p1i;
         u.x * v.y - u.y * v.x
     };
 
-    if tri_area <= 0 || nz >= 0.0 {
+    let is_behind = p0.w < 1. && p0.w < 1. && p0.w < 1.;
+    // let is_behind = inv_ws[0] < 0. && inv_ws[1] < 0. && inv_ws[2] < 0.;
+
+    if tri_area <= 0 || nz >= 0 || is_behind || min.x == max.x || min.y == max.y {
+        if is_behind {
+            metrics.behind_culled += 1;
+        }
+        if nz >= 0 {
+            metrics.backfaces_culled += 1;
+        }
         return;
     }
 
@@ -191,14 +221,14 @@ fn draw_triangle<VertOut, S>(
                 let z = w.dot(ndc_zs.splat());
                 let prev_depth =
                     unsafe { *depth_buf.as_ptr().add(idx).cast::<Simd<f32, LANES>>() };
-                let mask = mask & z.simd_lt(prev_depth) & z.simd_ge(Simd::splat(-1.));
+                let mut mask = mask & z.simd_lt(prev_depth) & z.simd_ge(Simd::splat(-1.));
                 let interp = Attributes::interpolate(&v0, &v1, &v2, w_persp);
                 let simd_pixels = unsafe {
                     &mut *(&mut pixels[idx] as *mut u32).cast::<Simd<u32, LANES>>()
                 };
                 let pixel_coords = IVec2xX::from([Simd::splat(x), Simd::splat(y)])
                     + IVec2xX::from([Simd::from([0, 1, 2, 3]), Simd::from([0, 0, 0, 0])]);
-                frag_shader.exec_specialized(mask, interp, pixel_coords, simd_pixels);
+                frag_shader.exec_specialized(&mut mask, interp, pixel_coords, simd_pixels);
 
                 let new_depth = mask.select(z, prev_depth);
                 unsafe {
@@ -219,22 +249,139 @@ fn draw_triangle<VertOut, S>(
 
         row_start += stride * STEP_Y as usize;
     }
+    metrics.triangles_drawn += 1;
 }
 
-pub fn draw_triangles<B, V, S>(
+/// Basically stores preallocated memory that can be reused between draw calls.
+pub struct RenderContext {
+    vertex_attrib: bumpalo::Bump,
+    tiles: bumpalo::Bump,
+}
+
+impl RenderContext {
+    pub fn alloc(cap: usize) -> Self {
+        RenderContext {
+            vertex_attrib: bumpalo::Bump::with_capacity(cap),
+            tiles: bumpalo::Bump::new(),
+        }
+    }
+}
+/*
+
+fn triangle_bbox(v0: Vec2i, v1: Vec2i, v2: Vec2i) -> BBox<i32> {
+    let min = v0.min(v1).min(v2);
+    let max = v0.max(v1).max(v2);
+    BBox {
+        x: min.x,
+        y: min.y,
+        width: max.x - min.x,
+        height: max.y - min.y,
+    }
+}
+
+pub fn draw_triangles_threads<B, V, S>(
     vert: &B,
-    tris: &[[B::Index; 3]],
+    tris: &[[usize; 3]],
     vert_shader: &V,
     frag_shader: &S,
     mut pixels: PixelBuf,
     mut depth_buf: MatrixSliceMut<f32>,
+    ctx: &mut RenderContext,
 ) where
     B: VertexBuf + ?Sized,
     V: VertexShader<B::Vertex>,
+    V::Output: Copy,
     S: FragmentShader<SimdAttr<4> = <V::Output as Attributes>::Simd<4>>,
 {
     assert_eq!(pixels.width, depth_buf.width);
     assert_eq!(pixels.height, depth_buf.height);
+
+    assert!(pixels.as_ptr().is_aligned_to(std::mem::align_of::<Simd<u32, LANES>>()));
+    assert!(depth_buf.as_ptr().is_aligned_to(std::mem::align_of::<Simd<f32, LANES>>()));
+
+    // Coalesce the pixel layout to be [rrrrggggbbbbaaaa] repeating
+    assert_eq!(pixels.width % 8, 0, "width must be a multiple of 8");
+    assert!(pixels
+        .as_ptr()
+        .is_aligned_to(std::mem::align_of::<Vec<Simd<u8, 4>, 4>>()));
+    {
+        let pixels = unsafe {
+            let ptr = pixels.as_mut_ptr().cast::<Vec<Simd<u8, 4>, 4>>();
+            std::slice::from_raw_parts_mut(ptr, pixels.size() >> 2)
+        };
+        for el in pixels {
+            *el = el.simd_transpose_4();
+        }
+    }
+
+    // Run the vertex shader and cache the results
+    ctx.vertex_attrib.reset();
+    let mut vertex_attrib = bumpalo::collections::Vec::new_in(&ctx.vertex_attrib);
+    vertex_attrib.extend(
+        (0..vert.len())
+            .map(|i| vert_shader.exec(vert.index(i)))
+    );
+
+    let mut metrics = Metrics::new();
+
+    let bbox = BBox {
+        x: 0,
+        y: 0,
+        width: pixels.width as i32,
+        height: pixels.height as i32,
+    };
+
+    let mut pixels_u32: MatrixSliceMut<u32> = unsafe { pixels.borrow().cast() };
+
+    for &[v0, v1, v2] in tris {
+        let (v2, v1, v0) = (v0, v1, v2);
+
+        draw_triangle(
+            vertex_attrib[v0],
+            vertex_attrib[v1],
+            vertex_attrib[v2],
+            frag_shader,
+            pixels_u32.borrow(),
+            depth_buf.borrow(),
+            bbox,
+            &mut metrics
+        );
+    }
+
+    // Restore to original pixel layout
+    {
+        let pixels = unsafe {
+            let ptr = pixels.as_mut_ptr().cast::<Vec<Simd<u8, 4>, 4>>();
+            std::slice::from_raw_parts_mut(ptr, pixels.size() >> 2)
+        };
+        for el in pixels {
+            *el = el.simd_transpose_4();
+        }
+    }
+
+    println!("{metrics}");
+}
+*/
+
+pub fn draw_triangles<B, V, S>(
+    vert: &B,
+    tris: &[[usize; 3]],
+    vert_shader: &V,
+    frag_shader: &S,
+    mut pixels: PixelBuf,
+    mut depth_buf: MatrixSliceMut<f32>,
+    ctx: &mut RenderContext,
+) where
+    B: VertexBuf + ?Sized,
+    V: VertexShader<B::Vertex>,
+    V::Output: Copy,
+    S: FragmentShader<SimdAttr<4> = <V::Output as Attributes>::Simd<4>>,
+{
+    assert_eq!(pixels.width, depth_buf.width);
+    assert_eq!(pixels.height, depth_buf.height);
+
+    assert!(pixels.as_ptr().is_aligned_to(std::mem::align_of::<Simd<u32, LANES>>()));
+    assert!(depth_buf.as_ptr().is_aligned_to(std::mem::align_of::<Simd<f32, LANES>>()));
 
     // Coalesce the pixel layout to be [rrrrggggbbbbaaaa] repeating
     assert_eq!(pixels.width % 4, 0, "width must be a multiple of 4");
@@ -251,16 +398,38 @@ pub fn draw_triangles<B, V, S>(
         }
     }
 
+    // Run the vertex shader and cache the results
+    ctx.vertex_attrib.reset();
+    let mut vertex_attrib = bumpalo::collections::Vec::new_in(&ctx.vertex_attrib);
+    vertex_attrib.extend(
+        (0..vert.len())
+            .map(|i| vert_shader.exec(vert.index(i)))
+    );
+
+    let mut metrics = Metrics::new();
+
+    let bbox = BBox {
+        x: 0,
+        y: 0,
+        width: pixels.width as i32,
+        height: pixels.height as i32,
+    };
+
     let mut pixels_u32: MatrixSliceMut<u32> = unsafe { pixels.borrow().cast() };
 
     for &[v0, v1, v2] in tris {
         let (v2, v1, v0) = (v0, v1, v2);
 
-        let attrs0 = vert_shader.exec(vert.index(v0));
-        let attrs1 = vert_shader.exec(vert.index(v1));
-        let attrs2 = vert_shader.exec(vert.index(v2));
-
-        draw_triangle(attrs0, attrs1, attrs2, frag_shader, pixels_u32.borrow(), depth_buf.borrow());
+        draw_triangle(
+            vertex_attrib[v0],
+            vertex_attrib[v1],
+            vertex_attrib[v2],
+            frag_shader,
+            pixels_u32.borrow(),
+            depth_buf.borrow(),
+            bbox,
+            &mut metrics
+        );
     }
 
     // Restore to original pixel layout
@@ -273,11 +442,13 @@ pub fn draw_triangles<B, V, S>(
             *el = el.simd_transpose_4();
         }
     }
+
+    println!("{metrics}");
 }
 
 pub fn draw_triangles_depth<B, V>(
     vert: &B,
-    tris: &[[B::Index; 3]],
+    tris: &[[usize; 3]],
     vert_shader: &V,
     depth_buf: MatrixSliceMut<f32>,
 ) where
@@ -375,6 +546,34 @@ pub fn draw_triangles_depth<B, V>(
 
             row_start += stride * STEP_Y as usize;
         }
+    }
+}
+
+#[derive(Default, Debug, Clone)]
+struct Metrics {
+    triangles_drawn: usize,
+    backfaces_culled: usize,
+    behind_culled: usize,
+}
+
+impl Metrics {
+    fn new() -> Self {
+        Metrics {
+            triangles_drawn: 0,
+            backfaces_culled: 0,
+            behind_culled: 0,
+        }
+    }
+}
+
+impl std::fmt::Display for Metrics {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        let Metrics { triangles_drawn, backfaces_culled, behind_culled } = self;
+        writeln!(f, "render metrics:")?;
+        writeln!(f, "\ttriangles drawn: {triangles_drawn}")?;
+        writeln!(f, "\tbackfaces culled: {backfaces_culled}")?;
+        writeln!(f, "\tbehind culled: {behind_culled}")?;
+        Ok(())
     }
 }
 
