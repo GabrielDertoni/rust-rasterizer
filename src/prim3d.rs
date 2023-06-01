@@ -169,11 +169,21 @@ fn draw_triangle<VertOut, S>(
         u.x * v.y - u.y * v.x
     };
 
-    let is_behind = p0.w < 1. && p0.w < 1. && p0.w < 1.;
+    // source: https://www.cs.utexas.edu/~fussell/courses/cs354-fall2015/lectures/lecture9.pdf
+    // This assumes that if all points are outside the frustum, than so is the triangle
+    let inside_frustum = {
+        let range0 = -p0.w..p0.w;
+        let range1 = -p1.w..p1.w;
+        let range2 = -p2.w..p2.w;
+
+        (range0.contains(&p0.x) && range0.contains(&p0.y) && range0.contains(&p0.z))
+            || (range1.contains(&p1.x) && range1.contains(&p1.y) && range1.contains(&p1.z))
+            || (range2.contains(&p2.x) && range2.contains(&p2.y) && range2.contains(&p2.z))
+    };
     // let is_behind = inv_ws[0] < 0. && inv_ws[1] < 0. && inv_ws[2] < 0.;
 
-    if tri_area <= 0 || nz >= 0 || is_behind || min.x == max.x || min.y == max.y {
-        if is_behind {
+    if tri_area <= 0 || nz >= 0 || !inside_frustum || min.x == max.x || min.y == max.y {
+        if !inside_frustum {
             metrics.behind_culled += 1;
         }
         if nz >= 0 {
