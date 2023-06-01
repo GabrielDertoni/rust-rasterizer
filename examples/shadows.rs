@@ -277,6 +277,10 @@ fn main() {
                 (ElementState::Released, VirtualKeyCode::A | VirtualKeyCode::D) => {
                     world.axis.x = 0.0
                 }
+                (ElementState::Pressed, VirtualKeyCode::Right) => world.update_cursor(5., 0.),
+                (ElementState::Pressed, VirtualKeyCode::Left) => world.update_cursor(-5., 0.),
+                (ElementState::Pressed, VirtualKeyCode::Up) => world.update_cursor(0., 5.),
+                (ElementState::Pressed, VirtualKeyCode::Down) => world.update_cursor(0., -5.),
                 _ => (),
             },
             Event::MainEventsCleared => {
