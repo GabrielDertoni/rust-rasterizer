@@ -4,19 +4,23 @@ use std::ops::{
 };
 use std::simd::{LaneCount, Simd, SimdElement, SimdFloat, SimdOrd, StdFloat, SupportedLaneCount};
 
+use crate::{IntoSimd, StructureOfArray};
+
 pub type Mat3x3 = Mat<f32, 3, 3>;
 pub type Mat4x4 = Mat<f32, 4, 4>;
 
-#[repr(transparent)]
+#[repr(C)]
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub struct Mat<T, const M: usize, const N: usize>([[T; N]; M]);
+pub struct Mat<T, const M: usize, const N: usize> {
+    pub rows: [[T; N]; M],
+}
 
 impl<T: Copy, const M: usize, const N: usize> Mat<T, M, N> {
     pub fn map<F, U>(self, f: F) -> Mat<U, M, N>
     where
         F: Fn(T) -> U,
     {
-        // Yep, this is some shit code! But as it turns out, the builtin array `map` won't unroll many times it should. In fact, this was
+        // Yep, this is some ugly code! But as it turns out, the builtin array `map` won't unroll many times it should. In fact, this was
         // big enough that in some benchmarks, using the builtin `map` function is ~30% slower. Hence, we're sticking with this for now.
 
         use std::marker::PhantomData;
@@ -68,13 +72,15 @@ impl<T: Copy, const M: usize, const N: usize> Mat<T, M, N> {
             }
         }
 
-        let mat = ManuallyDrop::new(self.0);
+        let mat = ManuallyDrop::new(self.rows);
 
-        Mat(detail::array_from_fn(FnMat(
-            unsafe { detail::transmute::<_, [ManuallyDrop<[ManuallyDrop<T>; N]>; M]>(&mat) },
-            &f,
-            PhantomData,
-        )))
+        Mat {
+            rows: detail::array_from_fn(FnMat(
+                unsafe { detail::transmute::<_, [ManuallyDrop<[ManuallyDrop<T>; N]>; M]>(&mat) },
+                &f,
+                PhantomData,
+            )),
+        }
     }
 
     /// # Panics
@@ -93,21 +99,16 @@ impl<T: Copy, const M: usize, const N: usize> Mat<T, M, N> {
         let mut arr = unsafe { MaybeUninit::<[[MaybeUninit<R>; N]; M]>::uninit().assume_init() };
         for i in 0..M {
             for j in 0..N {
-                arr[i][j].write(f(self.0[i][j], rhs.0[i][j]));
+                arr[i][j].write(f(self.rows[i][j], rhs.rows[i][j]));
             }
         }
 
         // SAFETY: Equivalent to `assume_init`, we have initialized every element.
-        unsafe { Mat(transmute_copy(&arr)) }
-    }
-
-    #[inline(always)]
-    pub fn splat<const LANES: usize>(self) -> Mat<Simd<T, LANES>, M, N>
-    where
-        T: SimdElement,
-        LaneCount<LANES>: SupportedLaneCount,
-    {
-        self.map(Simd::splat)
+        unsafe {
+            Mat {
+                rows: transmute_copy(&arr),
+            }
+        }
     }
 
     pub fn transpose(self) -> Mat<T, N, M> {
@@ -129,12 +130,16 @@ impl<T: Copy + Ord, const M: usize, const N: usize> Mat<T, M, N> {
 impl<T: Num, const M: usize, const N: usize> Mat<T, M, N> {
     #[inline(always)]
     pub fn zero() -> Self {
-        Mat([[T::zero(); N]; M])
+        Mat {
+            rows: [[T::zero(); N]; M],
+        }
     }
 
     #[inline(always)]
     pub fn one() -> Self {
-        Mat([[T::one(); N]; M])
+        Mat {
+            rows: [[T::one(); N]; M],
+        }
     }
 
     #[inline(always)]
@@ -142,7 +147,7 @@ impl<T: Num, const M: usize, const N: usize> Mat<T, M, N> {
     where
         T: Copy,
     {
-        Mat([[el; N]; M])
+        Mat { rows: [[el; N]; M] }
     }
 
     #[inline(always)]
@@ -194,7 +199,7 @@ impl<T: Num> Mat<T, 3, 3> {
     }
 
     pub fn determinant(&self) -> T {
-        let m = &self.0;
+        let m = &self.rows;
         m[0][0] * m[1][1] * m[2][2] + m[0][1] * m[1][2] * m[2][0] + m[0][2] * m[1][0] * m[2][1]
             - m[0][0] * m[1][2] * m[2][1]
             - m[0][1] * m[1][0] * m[2][2]
@@ -202,9 +207,9 @@ impl<T: Num> Mat<T, 3, 3> {
     }
 
     pub fn adjugate(&self) -> Self {
-        let [m00, m01, m02] = self.0[0];
-        let [m10, m11, m12] = self.0[1];
-        let [m20, m21, m22] = self.0[2];
+        let [m00, m01, m02] = self.rows[0];
+        let [m10, m11, m12] = self.rows[1];
+        let [m20, m21, m22] = self.rows[2];
 
         Self::from([
             [
@@ -243,10 +248,12 @@ impl<T: Float> Mat<T, 4, 4> {
         let z = T::zero();
         let cos = theta.cos();
         let sin = theta.sin();
-        Mat([[   o,   z,   z,   z],
-             [   z, cos,-sin,   z],
-             [   z, sin, cos,   z],
-             [   z,   z,   z,   o]])
+        Mat {
+            rows: [[   o,   z,   z,   z],
+                   [   z, cos,-sin,   z],
+                   [   z, sin, cos,   z],
+                   [   z,   z,   z,   o]]
+        }
     }
 
     #[rustfmt::skip]
@@ -255,10 +262,12 @@ impl<T: Float> Mat<T, 4, 4> {
         let z = T::zero();
         let cos = theta.cos();
         let sin = theta.sin();
-        Mat([[ cos,   z, sin,   z],
-             [   z,   o,   z,   z],
-             [-sin,   z, cos,   z],
-             [   z,   z,   z,   o]])
+        Mat {
+            rows: [[ cos,   z, sin,   z],
+                   [   z,   o,   z,   z],
+                   [-sin,   z, cos,   z],
+                   [   z,   z,   z,   o]]
+        }
     }
 
     #[rustfmt::skip]
@@ -267,10 +276,12 @@ impl<T: Float> Mat<T, 4, 4> {
         let z = T::zero();
         let cos = theta.cos();
         let sin = theta.sin();
-        Mat([[ cos,-sin,   z,   z],
-             [ sin, cos,   z,   z],
-             [   z,   z,   o,   z],
-             [   z,   z,   z,   o]])
+        Mat {
+            rows: [[ cos,-sin,   z,   z],
+                   [ sin, cos,   z,   z],
+                   [   z,   z,   o,   z],
+                   [   z,   z,   z,   o]]
+        }
     }
 
     pub fn rotate(self, euler_angles: Vec<T, 3>) -> Self {
@@ -278,9 +289,11 @@ impl<T: Float> Mat<T, 4, 4> {
     }
 
     pub fn determinant(&self) -> T {
-        self.0[0][0] * (self.0[1][1] * self.0[2][2] - self.0[2][1] * self.0[1][2])
-            - self.0[1][0] * (self.0[0][1] * self.0[2][2] - self.0[2][1] * self.0[0][2])
-            - (self.0[2][0] * self.0[0][1] * self.0[1][2] - self.0[1][1] * self.0[0][2])
+        self.rows[0][0] * (self.rows[1][1] * self.rows[2][2] - self.rows[2][1] * self.rows[1][2])
+            - self.rows[1][0]
+                * (self.rows[0][1] * self.rows[2][2] - self.rows[2][1] * self.rows[0][2])
+            - (self.rows[2][0] * self.rows[0][1] * self.rows[1][2]
+                - self.rows[1][1] * self.rows[0][2])
     }
 
     pub fn inverse(&self) -> Self {
@@ -290,10 +303,10 @@ impl<T: Float> Mat<T, 4, 4> {
 
     // source: https://docs.rs/ultraviolet/0.9.1/src/ultraviolet/mat.rs.html#1385-1443
     pub fn adjugate(&self) -> Self {
-        let [m00, m01, m02, m03] = self.0[0];
-        let [m10, m11, m12, m13] = self.0[1];
-        let [m20, m21, m22, m23] = self.0[2];
-        let [m30, m31, m32, m33] = self.0[3];
+        let [m00, m01, m02, m03] = self.rows[0];
+        let [m10, m11, m12, m13] = self.rows[1];
+        let [m20, m21, m22, m23] = self.rows[2];
+        let [m30, m31, m32, m33] = self.rows[3];
 
         let coef00 = (m22 * m33) - (m32 * m23);
         let coef02 = (m12 * m33) - (m32 * m13);
@@ -404,8 +417,8 @@ impl<T: Float> Mat<T, 4, 4> {
 }
 
 impl<T, const M: usize, const N: usize> From<[[T; N]; M]> for Mat<T, M, N> {
-    fn from(value: [[T; N]; M]) -> Self {
-        Mat(value)
+    fn from(rows: [[T; N]; M]) -> Self {
+        Mat { rows }
     }
 }
 
@@ -426,11 +439,11 @@ impl<T: fmt::Debug, const M: usize, const N: usize> fmt::Debug for Mat<T, M, N> 
             write!(f, "]")
         }
         write!(f, "[")?;
-        print_row(&self.0[0], &mut *f)?;
+        print_row(&self.rows[0], &mut *f)?;
         for i in 1..M {
             writeln!(f, ",")?;
             write!(f, " ")?;
-            print_row(&self.0[i], &mut *f)?;
+            print_row(&self.rows[i], &mut *f)?;
         }
         write!(f, "]")
     }
@@ -460,18 +473,53 @@ impl<T: fmt::Display, const M: usize, const N: usize> fmt::Display for Mat<T, M,
         for i in 0..M {
             for j in 0..N {
                 buf.clear();
-                write!(&mut buf, "{}", self.0[i][j])?;
+                write!(&mut buf, "{}", self.rows[i][j])?;
                 maxlen = Ord::max(maxlen, buf.len());
             }
         }
         write!(f, "[")?;
-        print_row(&self.0[0], &mut *f, maxlen)?;
+        print_row(&self.rows[0], &mut *f, maxlen)?;
         for i in 1..M {
             writeln!(f, ",")?;
             write!(f, " ")?;
-            print_row(&self.0[i], &mut *f, maxlen)?;
+            print_row(&self.rows[i], &mut *f, maxlen)?;
         }
         write!(f, "]")
+    }
+}
+
+impl<T: SimdElement, const M: usize, const N: usize> IntoSimd for Mat<T, M, N> {
+    type Simd<const LANES: usize> = Mat<Simd<T, LANES>, M, N>
+    where
+        LaneCount<LANES>: SupportedLaneCount;
+
+    #[inline(always)]
+    fn splat<const LANES: usize>(self) -> Self::Simd<LANES>
+    where
+        LaneCount<LANES>: SupportedLaneCount,
+    {
+        self.map(Simd::splat)
+    }
+}
+
+impl<T, const M: usize, const N: usize, const LANES: usize> StructureOfArray<LANES>
+    for Mat<Simd<T, LANES>, M, N>
+where
+    LaneCount<LANES>: SupportedLaneCount,
+    T: SimdElement,
+{
+    type Structure = Mat<T, M, N>;
+
+    fn from_array(array: [Self::Structure; LANES]) -> Self {
+        // TODO: Use `detail::array_from_fn`
+        Mat::from(std::array::from_fn(|i| {
+            std::array::from_fn(|j| Simd::from_array(std::array::from_fn(|k| array[k].rows[i][j])))
+        }))
+    }
+
+    #[inline(always)]
+    fn index(&self, i: usize) -> Self::Structure {
+        self.map(|el| el[i])
     }
 }
 
@@ -499,7 +547,7 @@ pub type IVec4x4 = Vec<Simd<i32, 4>, 4>;
 
 impl<T, const N: usize> Vec<T, N> {
     pub fn to_array(&self) -> [T; N] {
-        unsafe { std::mem::transmute_copy(&self.0) }
+        unsafe { std::mem::transmute_copy(&self.rows) }
     }
 
     pub fn as_array(&self) -> &[T; N] {
@@ -510,7 +558,7 @@ impl<T, const N: usize> Vec<T, N> {
         if START + COUNT > N {
             panic!("index out of bounds");
         }
-        let ptr = self.0.as_ptr();
+        let ptr = self.rows.as_ptr();
         unsafe { std::mem::transmute(&*ptr.add(START)) }
     }
 
@@ -518,7 +566,7 @@ impl<T, const N: usize> Vec<T, N> {
         if START + COUNT > N {
             panic!("index out of bounds");
         }
-        let ptr = self.0.as_mut_ptr();
+        let ptr = self.rows.as_mut_ptr();
         unsafe { std::mem::transmute(&mut *ptr.add(START)) }
     }
 
@@ -543,13 +591,13 @@ impl<T, const M: usize, const N: usize> Vec<[T; M], N> {
 
 impl<T: Num, const N: usize> Vec<T, N> {
     pub fn mag_sq(&self) -> T {
-        self.0.iter().map(|&[coord]| coord * coord).sum()
+        self.rows.iter().map(|&[coord]| coord * coord).sum()
     }
 
     pub fn dot(&self, rhs: Self) -> T {
         let mut ret = T::zero();
         for i in 0..N {
-            ret += self.0[i][0] * rhs.0[i][0];
+            ret += self.rows[i][0] * rhs.rows[i][0];
         }
         ret
     }
@@ -569,30 +617,10 @@ impl<T: Float, const N: usize> Vec<T, N> {
     }
 }
 
-impl<T: Copy> Vec<T, 1> {
-    #[inline(always)]
-    pub fn splat_1<const LANES: usize>(self) -> Vec<Simd<T, LANES>, 1>
-    where
-        LaneCount<LANES>: SupportedLaneCount,
-        T: SimdElement,
-    {
-        Vec::from([Simd::splat(self.x)])
-    }
-}
-
 impl<T: Copy> Vec<T, 2> {
     #[inline(always)]
     pub fn map_2<U>(self, mut f: impl FnMut(T) -> U) -> Vec<U, 2> {
         Vec::from([f(self.x), f(self.y)])
-    }
-
-    #[inline(always)]
-    pub fn splat_2<const LANES: usize>(self) -> Vec<Simd<T, LANES>, 2>
-    where
-        LaneCount<LANES>: SupportedLaneCount,
-        T: SimdElement,
-    {
-        Vec::from([Simd::splat(self.x), Simd::splat(self.y)])
     }
 }
 
@@ -600,19 +628,6 @@ impl<T: Copy> Vec<T, 3> {
     #[inline(always)]
     pub fn map_3<U>(self, mut f: impl FnMut(T) -> U) -> Vec<U, 3> {
         Vec::from([f(self.x), f(self.y), f(self.z)])
-    }
-
-    #[inline(always)]
-    pub fn splat_3<const LANES: usize>(self) -> Vec<Simd<T, LANES>, 3>
-    where
-        LaneCount<LANES>: SupportedLaneCount,
-        T: SimdElement,
-    {
-        Vec::from([
-            Simd::splat(self.x),
-            Simd::splat(self.y),
-            Simd::splat(self.z),
-        ])
     }
 }
 
@@ -737,7 +752,9 @@ impl<T: SimdElement> Vec<Simd<T, 4>, 4> {
 
 impl<T, const N: usize> From<[T; N]> for Vec<T, N> {
     fn from(value: [T; N]) -> Self {
-        Mat(unsafe { std::mem::transmute_copy::<[T; N], [[T; 1]; N]>(&value) })
+        Mat {
+            rows: unsafe { std::mem::transmute_copy::<[T; N], [[T; 1]; N]>(&value) },
+        }
     }
 }
 
@@ -745,13 +762,13 @@ impl<T, const M: usize, const N: usize> Index<(usize, usize)> for Mat<T, M, N> {
     type Output = T;
 
     fn index(&self, (i, j): (usize, usize)) -> &T {
-        &self.0[i][j]
+        &self.rows[i][j]
     }
 }
 
 impl<T, const M: usize, const N: usize> IndexMut<(usize, usize)> for Mat<T, M, N> {
     fn index_mut(&mut self, (i, j): (usize, usize)) -> &mut T {
-        &mut self.0[i][j]
+        &mut self.rows[i][j]
     }
 }
 
@@ -823,7 +840,7 @@ impl<T: Num, const M: usize, const N: usize> Neg for Mat<T, M, N> {
     fn neg(mut self) -> Self::Output {
         for i in 0..M {
             for j in 0..N {
-                self.0[i][j] = -self.0[i][j];
+                self.rows[i][j] = -self.rows[i][j];
             }
         }
         self
@@ -1365,7 +1382,7 @@ macro_rules! impl_num_float_simd {
 
 impl_num_float_simd!(f32, f64);
 
-mod detail {
+pub(crate) mod detail {
     pub trait ConstFn {
         type Output;
 

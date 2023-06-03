@@ -12,11 +12,11 @@ use std::time::{Duration, Instant};
 
 use rasterization::{
     buf, clear_color,
-    obj::{Obj, Material},
+    obj::{Material, Obj},
     prim3d, shaders,
     utils::{Camera, FpvCamera},
     vec::{Mat4x4, Vec2, Vec3},
-    VertexBuf, VertBuf, Vertex,
+    VertBuf, Vertex, VertexBuf,
 };
 
 pub struct World {
@@ -45,23 +45,7 @@ impl World {
             obj.compute_normals();
         }
 
-        let mut vert_idxs_set = obj.tris.iter().copied().flatten().collect::<Vec<_>>();
-        vert_idxs_set.sort_unstable();
-        vert_idxs_set.dedup();
-        let mut vert_buf = VertBuf::with_capacity(vert_idxs_set.len());
-
-        for idxs in &vert_idxs_set {
-            vert_buf.push(Vertex {
-                position: obj.verts[idxs.position as usize],
-                normal: obj.normals[idxs.normal as usize],
-                uv: obj.uvs[idxs.uv as usize],
-            });
-        }
-
-        let mut index_buf = Vec::with_capacity(obj.tris.len());
-        for tri in &obj.tris {
-            index_buf.push(tri.map(|v| vert_idxs_set.binary_search(&v).unwrap()));
-        }
+        let (vert_buf, index_buf) = VertBuf::from_obj(&obj);
 
         println!("Initially had {} positions, {} normals and {} uvs. Now converted into {} distict vertices", obj.verts.len(), obj.normals.len(), obj.uvs.len(), vert_buf.len());
 
@@ -139,6 +123,7 @@ impl World {
                 &self.index_buf,
                 &|vertex: Vertex| light_transform * vertex.position,
                 shadow_buf.borrow(),
+                &mut self.render_ctx,
             );
             // Pretty dumb way to make a circular spotlight
             let radius = shadow_buf.width as f32 * 0.5;

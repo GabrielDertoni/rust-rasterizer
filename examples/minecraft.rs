@@ -12,11 +12,11 @@ use std::time::{Duration, Instant};
 
 use rasterization::{
     buf, clear_color,
-    obj::{Obj, Material},
+    obj::{Material, Obj},
     prim3d, shaders,
     utils::{Camera, FpvCamera},
-    vec::{Mat4x4, Vec2, Vec3},
-    VertexBuf, VertBuf, Vertex,
+    vec::{Mat4x4, Vec2, Vec3, Vec4},
+    vertex_shader_simd, IntoSimd, VertBuf, Vertex, VertexBuf,
 };
 
 pub struct World {
@@ -45,23 +45,7 @@ impl World {
             obj.compute_normals();
         }
 
-        let mut vert_idxs_set = obj.tris.iter().copied().flatten().collect::<Vec<_>>();
-        vert_idxs_set.sort_unstable();
-        vert_idxs_set.dedup();
-        let mut vert_buf = VertBuf::with_capacity(vert_idxs_set.len());
-
-        for idxs in &vert_idxs_set {
-            vert_buf.push(Vertex {
-                position: obj.verts[idxs.position as usize],
-                normal: obj.normals[idxs.normal as usize],
-                uv: obj.uvs[idxs.uv as usize],
-            });
-        }
-
-        let mut index_buf = Vec::with_capacity(obj.tris.len());
-        for tri in &obj.tris {
-            index_buf.push(tri.map(|v| vert_idxs_set.binary_search(&v).unwrap()));
-        }
+        let (vert_buf, index_buf) = VertBuf::from_obj(&obj);
 
         println!("Initially had {} positions, {} normals and {} uvs. Now converted into {} distict vertices", obj.verts.len(), obj.normals.len(), obj.uvs.len(), vert_buf.len());
 
@@ -125,7 +109,7 @@ impl World {
         }
     }
 
-    fn render_without_shadows(&mut self, pixels: buf::PixelBuf) {
+    fn render_without_shadows(&mut self, mut pixels: buf::PixelBuf) {
         let mut depth_buf = buf::MatrixSliceMut::new(
             &mut self.depth_buf,
             self.width as usize,
@@ -150,13 +134,18 @@ impl World {
         let frag_shader = shaders::textured::TexturedFragmentShader::new(texture);
 
         let depth_start = Instant::now();
-        prim3d::draw_triangles_depth(
-            &self.vert_buf,
+        prim3d::draw_triangles_depth_specialized(
+            &self.vert_buf.positions,
             &self.index_buf,
-            &|vertex: Vertex| camera_transform * vertex.position,
+            camera_transform,
             depth_buf.borrow(),
             &mut self.render_ctx,
         );
+        for y in 0..pixels.height {
+            for x in 0..pixels.width {
+                depth_buf[(x, y)] += f32::EPSILON;
+            }
+        }
         println!("Rendering depth took {:?}", depth_start.elapsed());
 
         prim3d::draw_triangles(
@@ -164,10 +153,24 @@ impl World {
             &self.index_buf,
             &vert_shader,
             &frag_shader,
-            pixels,
-            depth_buf,
+            pixels.borrow(),
+            depth_buf.borrow(),
             &mut self.render_ctx,
         );
+
+        /*
+        for y in 0..pixels.height {
+            for x in 0..pixels.width {
+                let depth = depth_buf[(x, y)].clamp(-1., 1.);
+                let z =
+                    1. / ((depth - (far + near) / (far - near)) * (far - near) / (2. * far * near));
+                let color = (z + near) / (near - far);
+                let color = color * 255.;
+                let color = color as u8;
+                pixels[(x, y)] = [color, color, color, 0xff];
+            }
+        }
+        */
     }
 
     fn render_with_shadows(&mut self, pixels: buf::PixelBuf) {
@@ -193,7 +196,9 @@ impl World {
             prim3d::draw_triangles_depth(
                 &self.vert_buf,
                 &self.index_buf,
-                &|vertex: Vertex| light_transform * vertex.position,
+                &vertex_shader_simd!([light_transform: Mat4x4] |vertex: Vertex| -> Vec4 {
+                    light_transform.splat() * vertex.position
+                }),
                 shadow_buf.borrow(),
                 &mut self.render_ctx,
             );
@@ -343,6 +348,10 @@ fn main() {
                 (ElementState::Released, VirtualKeyCode::A | VirtualKeyCode::D) => {
                     world.axis.x = 0.0
                 }
+                (ElementState::Pressed, VirtualKeyCode::Right) => world.update_cursor(20., 0.),
+                (ElementState::Pressed, VirtualKeyCode::Left) => world.update_cursor(-20., 0.),
+                (ElementState::Pressed, VirtualKeyCode::Up) => world.update_cursor(0., 20.),
+                (ElementState::Pressed, VirtualKeyCode::Down) => world.update_cursor(0., -20.),
                 _ => (),
             },
             Event::MainEventsCleared => {

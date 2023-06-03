@@ -1,42 +1,19 @@
 use crate::{
-    vec::{Mat4x4, Vec, Vec2, Vec2xN, Vec3xN, Vec4},
     buf::Texture,
-    Vertex, VertexShader, Attributes, FragmentShader,
+    vec::{Mat4x4, Vec, Vec2, Vec3xN, Vec4},
+    Attributes, FragmentShader, IntoSimd, StructureOfArray, Vertex, VertexShader, VertexSimd,
 };
 
-use std::simd::{LaneCount, Mask, Simd, SupportedLaneCount, SimdPartialEq};
+use std::simd::{LaneCount, Mask, Simd, SimdPartialEq, SupportedLaneCount};
 
-pub struct TexturedVertexShader {
-    transform: Mat4x4,
-}
-
-impl TexturedVertexShader {
-    pub fn new(transform: Mat4x4) -> Self {
-        TexturedVertexShader {
-            transform,
-        }
-    }
-}
-
-impl VertexShader<Vertex> for TexturedVertexShader {
-    type Output = TexturedAttributes;
-
-    fn exec(&self, vertex: Vertex) -> Self::Output {
-        TexturedAttributes {
-            position_ndc: self.transform * vertex.position,
-            uv: vertex.uv,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-// #[derive(Attributes)]
+#[derive(Clone, Copy, Debug, IntoSimd, Attributes)]
 pub struct TexturedAttributes {
-    // #[position]
+    #[position]
     pub position_ndc: Vec4,
     pub uv: Vec2,
 }
 
+/*
 pub struct TexturedAttributesSimd<const LANES: usize>
 where
     LaneCount<LANES>: SupportedLaneCount,
@@ -44,7 +21,7 @@ where
     pub uv: Vec2xN<LANES>,
 }
 
-impl Attributes for TexturedAttributes {
+impl IntoSimd for TexturedAttributes {
     type Simd<const LANES: usize> = TexturedAttributesSimd<LANES>
     where
         LaneCount<LANES>: SupportedLaneCount;
@@ -57,7 +34,29 @@ impl Attributes for TexturedAttributes {
             uv: self.uv.splat(),
         }
     }
+}
 
+impl<const LANES: usize> StructureOfArray<LANES> for TexturedAttributesSimd<LANES>
+where
+    LaneCount<LANES>: SupportedLaneCount,
+{
+    type Structure = TexturedAttributes;
+
+    fn from_array(array: [Self::Structure; LANES]) -> Self {
+        TexturedAttributesSimd {
+            uv: Vec2xN::from_array(array.map(|el| el.uv)),
+        }
+    }
+
+    fn index(&self, i: usize) -> Self::Structure {
+        TexturedAttributes {
+            position_ndc: todo!(),
+            uv: self.uv.index(i),
+        }
+    }
+}
+
+impl Attributes for TexturedAttributes {
     fn interpolate<const LANES: usize>(
         p0: &Self,
         p1: &Self,
@@ -80,6 +79,41 @@ impl Attributes for TexturedAttributes {
         &mut self.position_ndc
     }
 }
+*/
+
+pub struct TexturedVertexShader {
+    transform: Mat4x4,
+}
+
+impl TexturedVertexShader {
+    pub fn new(transform: Mat4x4) -> Self {
+        TexturedVertexShader { transform }
+    }
+}
+
+impl VertexShader<Vertex> for TexturedVertexShader {
+    type Output = TexturedAttributes;
+
+    fn exec(&self, vertex: Vertex) -> Self::Output {
+        TexturedAttributes {
+            position_ndc: self.transform * vertex.position,
+            uv: vertex.uv,
+        }
+    }
+
+    fn exec_simd<const LANES: usize>(
+        &self,
+        vertex: VertexSimd<LANES>,
+    ) -> TexturedAttributesSimd<LANES>
+    where
+        LaneCount<LANES>: SupportedLaneCount,
+    {
+        TexturedAttributesSimd {
+            position_ndc: self.transform.splat() * vertex.position,
+            uv: vertex.uv,
+        }
+    }
+}
 
 pub struct TexturedFragmentShader<'a> {
     texture: Texture<'a>,
@@ -87,17 +121,11 @@ pub struct TexturedFragmentShader<'a> {
 
 impl<'a> TexturedFragmentShader<'a> {
     pub fn new(texture: Texture<'a>) -> Self {
-        TexturedFragmentShader {
-            texture,
-        }
+        TexturedFragmentShader { texture }
     }
 }
 
-impl<'a> FragmentShader for TexturedFragmentShader<'a> {
-    type SimdAttr<const LANES: usize> = TexturedAttributesSimd<LANES>
-    where
-        LaneCount<LANES>: SupportedLaneCount;
-
+impl<'a> FragmentShader<TexturedAttributes> for TexturedFragmentShader<'a> {
     #[inline(always)]
     fn exec<const LANES: usize>(
         &self,
@@ -115,12 +143,16 @@ impl<'a> FragmentShader for TexturedFragmentShader<'a> {
     fn exec_specialized(
         &self,
         mask: &mut Mask<i32, 4>,
-        attrs: Self::SimdAttr<4>,
+        attrs: TexturedAttributesSimd<4>,
         _pixel_coords: Vec<Simd<i32, 4>, 2>,
         pixels: &mut Simd<u32, 4>,
     ) {
         let colors = self.texture.index_uv(attrs.uv, *mask);
-        let colors = Simd::from(colors.map(|el| u32::from_ne_bytes(el.to_array())).to_array());
+        let colors = Simd::from(
+            colors
+                .map(|el| u32::from_ne_bytes(el.to_array()))
+                .to_array(),
+        );
 
         // Will be 1s where the pixel is visible
         let alpha = colors.as_array()[3];
