@@ -5,7 +5,8 @@ use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use rasterization::{
     buf::{self, MatrixSliceMut, PixelBuf},
     obj::Obj,
-    prim3d, shaders,
+    prim3d::{self, CullBackFaces},
+    shaders,
     utils::{Camera, FpvCamera},
     vec::{Mat4x4, Vec2, Vec3, Vec4},
     vertex_shader_simd, IntoSimd, VertBuf, Vertex, VertexBuf,
@@ -126,14 +127,13 @@ fn shadows(c: &mut Criterion) {
                     buf::MatrixSliceMut::new(&mut shadow_map, WIDTH as usize, HEIGHT as usize);
 
                 let light_transform = light_camera.transform_matrix();
-                prim3d::draw_triangles_depth(
-                    &vert_buf,
+                prim3d::draw_triangles_depth_specialized(
+                    &vert_buf.positions,
                     &index_buf,
-                    &vertex_shader_simd!([light_transform: Mat4x4] |vertex: Vertex| -> Vec4 {
-                        light_transform.splat() * vertex.position
-                    }),
+                    light_transform,
                     shadow_buf.borrow(),
                     &mut render_ctx,
+                    0.0,
                 );
                 // Pretty dumb way to make a circular spotlight
                 let radius = shadow_buf.width as f32 * 0.5;
@@ -252,6 +252,7 @@ fn minecraft(c: &mut Criterion) {
         })
     });
 
+    /*
     group.bench_function("depth", |b| {
         core_affinity::set_for_current(core_id);
         b.iter(|| {
@@ -268,6 +269,7 @@ fn minecraft(c: &mut Criterion) {
             black_box(depth_buf.borrow());
         })
     });
+    */
 
     group.bench_function("depth_specialized", |b| {
         core_affinity::set_for_current(core_id);
@@ -279,6 +281,7 @@ fn minecraft(c: &mut Criterion) {
                 camera_transform,
                 depth_buf.borrow(),
                 &mut render_ctx,
+                0.0,
             );
             black_box(depth_buf.borrow());
         })

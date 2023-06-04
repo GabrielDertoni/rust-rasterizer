@@ -54,7 +54,7 @@ pub fn draw_triangle_outline(
 /// - `W.z = orient_2d(C, A, P) / orient_2d(A, B, C)`
 ///
 /// It's also worth noting that `orient_2d(A, B, C)` is twice the area of the triangle ABC.
-pub fn orient_2d_i32(from: Vec2i, to: Vec2i, p: Vec2i) -> i32 {
+pub fn orient_2d<T: crate::vec::Num>(from: Vec<T, 2>, to: Vec<T, 2>, p: Vec<T, 2>) -> T {
     let u = to - from;
     let v = p - from;
     u.x * v.y - u.y * v.x
@@ -63,6 +63,10 @@ pub fn orient_2d_i32(from: Vec2i, to: Vec2i, p: Vec2i) -> i32 {
 const LANES: usize = 4;
 const STEP_X: i32 = 4;
 const STEP_Y: i32 = 1;
+const X_OFF: Simd<i32, LANES> = Simd::from_array([0, 1, 2, 3]);
+const Y_OFF: Simd<i32, LANES> = Simd::from_array([0, 0, 0, 0]);
+// const X_OFF: Simd<i32, LANES> = Simd::from_array([0, 0, 1, 1]);
+// const Y_OFF: Simd<i32, LANES> = Simd::from_array([0, 1, 0, 1]);
 
 // (b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x)
 // u.x         * (p.y - a.y) - u.y         * (p.x - a.x)
@@ -81,7 +85,7 @@ fn orient_2d_step(
 ) -> (Vec<Simd<i32, LANES>, 2>, Simd<i32, LANES>) {
     let u = to - from;
     let c = u.y * from.x - u.x * from.y;
-    let p = p.splat() + Vec::from([Simd::from([0, 1, 2, 3]), Simd::from([0, 0, 0, 0])]);
+    let p = p.splat() + Vec::from([X_OFF, Y_OFF]);
     let w = Simd::splat(u.x) * p.y - Simd::splat(u.y) * p.x + Simd::splat(c);
     let inc = Vec2i::from([-u.y * STEP_X, u.x * STEP_Y]).splat();
     (inc, w)
@@ -126,6 +130,27 @@ fn is_inside_frustum_clip(p0_clip: Vec4, p1_clip: Vec4, p2_clip: Vec4) -> bool {
         || (range2.contains(&p2_clip.x)
             && range2.contains(&p2_clip.y)
             && range2.contains(&p2_clip.z))
+}
+
+fn is_inside_frustum_screen(
+    p0_screen: Vec2i,
+    p1_screen: Vec2i,
+    p2_screen: Vec2i,
+    z0: f32,
+    z1: f32,
+    z2: f32,
+    width: i32,
+    height: i32,
+) -> bool {
+    ((0..width).contains(&p0_screen.x)
+        && (0..height).contains(&p0_screen.y)
+        && (-1.0..1.0).contains(&z0))
+        || ((0..width).contains(&p1_screen.x)
+            && (0..height).contains(&p1_screen.y)
+            && (-1.0..1.0).contains(&z1))
+        || ((0..width).contains(&p2_screen.x)
+            && (0..height).contains(&p2_screen.y)
+            && (-1.0..1.0).contains(&z2))
 }
 
 fn is_inside_frustum(p0_ndc: Vec3, p1_ndc: Vec3, p2_ndc: Vec3) -> bool {
@@ -180,7 +205,7 @@ fn draw_triangle<VertOut, S>(
     ]));
 
     // 2 times the area of the triangle
-    let tri_area = orient_2d_i32(p0_screen, p1_screen, p2_screen);
+    let tri_area = orient_2d(p0_screen, p1_screen, p2_screen);
 
     let nz = {
         let u = p0_screen - p1_screen;
@@ -349,7 +374,8 @@ pub fn draw_triangles<B, V, S>(
         .is_aligned_to(std::mem::align_of::<Simd<f32, LANES>>()));
 
     // Coalesce the pixel layout to be [rrrrggggbbbbaaaa] repeating
-    assert_eq!(pixels.width % 4, 0, "width must be a multiple of 4");
+    assert_eq!(pixels.width % LANES, 0, "width must be a multiple of LANES");
+    assert_eq!(depth_buf.stride % LANES, 0);
     assert!(pixels
         .as_ptr()
         .is_aligned_to(std::mem::align_of::<Vec<Simd<u8, 4>, 4>>()));
@@ -405,6 +431,7 @@ pub fn draw_triangles<B, V, S>(
     // println!("{metrics}");
 }
 
+/*
 pub fn draw_triangles_depth<B, V>(
     vert: &B,
     tris: &[[usize; 3]],
@@ -436,6 +463,7 @@ pub fn draw_triangles_depth<B, V>(
         );
     }
 }
+*/
 
 pub fn draw_triangles_depth_specialized(
     vert_positions: &[Vec4],
@@ -443,131 +471,160 @@ pub fn draw_triangles_depth_specialized(
     proj_matrix: Mat4x4,
     mut depth_buf: MatrixSliceMut<f32>,
     ctx: &mut RenderContext,
+    bias: f32,
 ) {
+    assert_eq!(depth_buf.width % LANES, 0);
+    assert_eq!(depth_buf.stride % LANES, 0);
     assert!(depth_buf
         .as_ptr()
         .is_aligned_to(std::mem::align_of::<Simd<f32, LANES>>()));
+
+    let width = depth_buf.width;
+    let height = depth_buf.height;
 
     // Run the vertex shader and cache the results
     // Run the vertex shader and cache the results
     ctx.vertex_attrib.reset();
     let mut vertex_attrib = bumpalo::collections::Vec::new_in(&ctx.vertex_attrib);
-    let last_multiple = (vert_positions.len() as isize).next_multiple_of(-(LANES as isize));
-    if last_multiple > 0 {
-        let r0 = Simd::from_array(proj_matrix.rows[0]);
-        let r1 = Simd::from_array(proj_matrix.rows[1]);
-        let r2 = Simd::from_array(proj_matrix.rows[2]);
-        let r3 = Simd::from_array(proj_matrix.rows[3]);
-        vertex_attrib.extend(
-            (0..last_multiple as usize)
-                .step_by(LANES)
-                .map(|i| {
-                    let v0 = Simd::from_array(vert_positions[i].to_array());
-                    let v1 = Simd::from_array(vert_positions[i + 1].to_array());
-                    let v2 = Simd::from_array(vert_positions[i + 2].to_array());
-                    let v3 = Simd::from_array(vert_positions[i + 3].to_array());
 
-                    let res03 = 1. / (r3 * v0).reduce_sum();
-                    let res00 = (r0 * v0).reduce_sum() * res03;
-                    let res01 = (r1 * v0).reduce_sum() * res03;
-                    let res02 = (r2 * v0).reduce_sum() * res03;
+    let r0 = Simd::from_array(proj_matrix.rows[0]);
+    let r1 = Simd::from_array(proj_matrix.rows[1]);
+    let r2 = Simd::from_array(proj_matrix.rows[2]);
+    let r3 = Simd::from_array(proj_matrix.rows[3]);
+    vertex_attrib.extend(vert_positions.iter().map(|v| {
+        let v = Simd::from_array(v.to_array());
 
-                    let res13 = 1. / (r3 * v1).reduce_sum();
-                    let res10 = (r0 * v1).reduce_sum() * res13;
-                    let res11 = (r1 * v1).reduce_sum() * res13;
-                    let res12 = (r2 * v1).reduce_sum() * res13;
+        let inv_w = 1. / (r3 * v).reduce_sum();
+        let x = (r0 * v).reduce_sum() * inv_w;
+        let y = (r1 * v).reduce_sum() * inv_w;
+        let z = (r2 * v).reduce_sum() * inv_w;
 
-                    let res23 = 1. / (r3 * v2).reduce_sum();
-                    let res20 = (r0 * v2).reduce_sum() * res23;
-                    let res21 = (r1 * v2).reduce_sum() * res23;
-                    let res22 = (r2 * v2).reduce_sum() * res23;
-
-                    let res33 = 1. / (r3 * v3).reduce_sum();
-                    let res30 = (r0 * v3).reduce_sum() * res33;
-                    let res31 = (r1 * v3).reduce_sum() * res33;
-                    let res32 = (r2 * v3).reduce_sum() * res33;
-
-                    [
-                        Vec4::from([res00, res01, res02, res03]),
-                        Vec4::from([res10, res11, res12, res13]),
-                        Vec4::from([res20, res21, res22, res23]),
-                        Vec4::from([res30, res31, res32, res33]),
-                    ]
-                })
-                .flatten(),
-        );
-    }
-    let rest = vert_positions.len() - last_multiple.max(0) as usize;
-    vertex_attrib.extend((rest..vert_positions.len() as usize).map(|i| {
-        let mut pos = proj_matrix * vert_positions[i];
-        let inv_w = 1. / pos.w;
-        *pos.xyz_mut() *= inv_w;
-        pos.w = inv_w;
-        pos
+        (
+            ndc_to_screen(Vec2::from([x, y]), width as f32, height as f32).to_i32(),
+            z,
+        )
     }));
 
     let bbox = BBox {
         x: 0,
         y: 0,
-        width: depth_buf.width as i32,
-        height: depth_buf.height as i32,
+        width: width as i32,
+        height: height as i32,
     };
 
     for &[v0, v1, v2] in tris {
         let (v2, v1, v0) = (v0, v1, v2);
 
         draw_triangle_depth(
-            vertex_attrib[v0],
-            vertex_attrib[v1],
-            vertex_attrib[v2],
+            vertex_attrib[v0].0,
+            vertex_attrib[v1].0,
+            vertex_attrib[v2].0,
+            vertex_attrib[v0].1,
+            vertex_attrib[v1].1,
+            vertex_attrib[v2].1,
             depth_buf.borrow(),
             bbox,
+            bias,
         );
     }
 }
 
+pub trait Culling {
+    const CULL_BACK_FACE: bool;
+    const CULL_FRONT_FACE: bool;
+
+    #[inline(always)]
+    fn sort_vertices<T: Attributes>(v0: &mut T, v1: &mut T, v2: &mut T) {
+        match (Self::CULL_FRONT_FACE, Self::CULL_BACK_FACE) {
+            (true, true) => (), // Order won't matter, we'll just cull everything
+            (false, true) => std::mem::swap(v0, v2), // Always swap
+            (true, false) => (), // Never swap
+            // Need to look at the signed area in order to swap only if necessary
+            (false, false)
+                if orient_2d(v0.position().xy(), v1.position().xy(), v2.position().xy()) < 0.0 =>
+            {
+                std::mem::swap(v0, v2)
+            }
+            (false, false) => (), // Already correct
+        }
+    }
+}
+
+pub struct CullBackFaces;
+
+impl Culling for CullBackFaces {
+    const CULL_BACK_FACE: bool = true;
+    const CULL_FRONT_FACE: bool = false;
+}
+
+pub struct CullFrontFaces;
+
+impl Culling for CullFrontFaces {
+    const CULL_BACK_FACE: bool = false;
+    const CULL_FRONT_FACE: bool = true;
+}
+
 #[inline(always)]
-fn draw_triangle_depth(
-    // A `Vec4` where xyz are in NDC and w is 1/z.
-    v0: Vec4,
-    v1: Vec4,
-    v2: Vec4,
-    depth_buf: MatrixSliceMut<f32>,
+fn is_triangle_visible(
+    p0_screen: Vec2i,
+    p1_screen: Vec2i,
+    p2_screen: Vec2i,
+    z0: f32,
+    z1: f32,
+    z2: f32,
     aabb: BBox<i32>,
-) {
-    let stride = depth_buf.stride;
-    let width = depth_buf.width as i32;
-    let height = depth_buf.height as i32;
-    let depth_buf = depth_buf.as_slice_mut();
+) -> bool {
+    let inside_frustum = is_inside_frustum_screen(
+        p0_screen,
+        p1_screen,
+        p2_screen,
+        z0,
+        z1,
+        z2,
+        aabb.width,
+        aabb.height,
+    );
 
-    let p0_ndc = *v0.position();
-    let p1_ndc = *v1.position();
-    let p2_ndc = *v2.position();
-
-    let p0_screen = ndc_to_screen(p0_ndc.xy(), width as f32, height as f32).to_i32();
-    let p1_screen = ndc_to_screen(p1_ndc.xy(), width as f32, height as f32).to_i32();
-    let p2_screen = ndc_to_screen(p2_ndc.xy(), width as f32, height as f32).to_i32();
-
-    let mut min = p0_screen.min(p1_screen).min(p2_screen);
-    min.x = min.x.next_multiple_of(-(LANES as i32)).max(aabb.x);
-    min.y = min.y.max(aabb.y);
-    let max = p0_screen.max(p1_screen).max(p2_screen).min(Vec2i::from([
-        aabb.x + aabb.width - STEP_X,
-        aabb.y + aabb.height - STEP_Y,
-    ]));
-
-    // 2 times the area of the triangle
-    let tri_area = orient_2d_i32(p0_screen, p1_screen, p2_screen);
-
+    // Compute the normal `z` coordinate for backface culling
     let nz = {
         let u = p0_screen - p1_screen;
         let v = p2_screen - p1_screen;
         u.x * v.y - u.y * v.x
     };
 
-    let inside_frustum = is_inside_frustum(p0_ndc.xyz(), p1_ndc.xyz(), p2_ndc.xyz());
+    inside_frustum && nz < 0
+}
 
-    if tri_area <= 0 || nz >= 0 || !inside_frustum || min.x == max.x || min.y == max.y {
+/// Fastest function to draw the depth buffer for a single 3D triangle.
+#[inline(always)]
+fn draw_triangle_depth(
+    p0_screen: Vec2i,
+    p1_screen: Vec2i,
+    p2_screen: Vec2i,
+    z0: f32,
+    z1: f32,
+    z2: f32,
+    depth_buf: MatrixSliceMut<f32>,
+    aabb: BBox<i32>,
+    bias: f32,
+) {
+    let mut min = p0_screen.min(p1_screen).min(p2_screen);
+    // Only works because `STEP_X` is a power of 2.
+    min.x &= !(STEP_X - 1) as i32;
+    min.x = min.x.max(aabb.x);
+    min.y &= !(STEP_Y - 1) as i32;
+    min.y = min.y.max(aabb.y);
+    let max = p0_screen.max(p1_screen).max(p2_screen).min(Vec2i::from([
+        aabb.x + aabb.width - STEP_X,
+        aabb.y + aabb.height - STEP_Y,
+    ]));
+
+    let is_visible = is_triangle_visible(p0_screen, p1_screen, p2_screen, z0, z1, z2, aabb);
+
+    // 2 times the area of the triangle
+    let tri_area = orient_2d(p0_screen, p1_screen, p2_screen);
+
+    if tri_area <= 0 || !is_visible || min.x == max.x || min.y == max.y {
         return;
     }
 
@@ -576,27 +633,38 @@ fn draw_triangle_depth(
     let (w2_inc, mut w2_row) = orient_2d_step(p0_screen, p1_screen, min);
 
     let inv_area = Simd::splat(1.0 / tri_area as f32);
+    let (z0, z1, z2) = (Simd::splat(z0), Simd::splat(z1), Simd::splat(z2));
+    let bias = Simd::splat(bias);
 
-    let mut row_start = min.y as usize * stride + min.x as usize;
-    for _ in (min.y..=max.y).step_by(STEP_Y as usize) {
+    let stride = depth_buf.stride;
+    let depth_buf = depth_buf.as_slice_mut();
+
+    let mut y = min.y;
+    while y < max.y {
         let mut w0 = w0_row;
         let mut w1 = w1_row;
         let mut w2 = w2_row;
-        let mut idx = row_start;
-        for _ in (min.x..=max.x).step_by(STEP_X as usize) {
+        let mut x = min.x;
+        while x < max.x {
             let mask = (w0 | w1 | w2).simd_ge(Simd::splat(0));
 
             if mask.any() {
-                let w = Vec::from([w0, w1, w2]).to_f32() * inv_area;
-
-                let z = w.dot(Vec::from([p0_ndc.z, p1_ndc.z, p2_ndc.z]).splat());
-                let prev_depth = unsafe { *depth_buf.as_ptr().add(idx).cast::<Simd<f32, LANES>>() };
+                // yyyyxxxx
+                // yyyxxxyx
+                // let idx = (y / STEP_Y) * stride as i32
+                //     + (x / STEP_X) * (STEP_X * STEP_Y)
+                //     + (y % STEP_Y) * STEP_X
+                //     + x % STEP_X;
+                let idx = y * stride as i32 + x;
+                let idx = idx as usize;
+                let z = (w0.cast() * z0 + w1.cast() * z1 + w2.cast() * z2) * inv_area;
+                let prev_depth = unsafe { *depth_buf.as_ptr().add(idx).cast() };
                 let mask = mask & z.simd_lt(prev_depth);
 
-                let new_depth = mask.select(z, prev_depth);
+                let new_depth = mask.select(z + bias, prev_depth);
                 unsafe {
                     let ptr = &mut depth_buf[idx] as *mut f32;
-                    *ptr.cast::<Simd<f32, LANES>>() = new_depth;
+                    *ptr.cast() = new_depth;
                 }
             }
 
@@ -604,13 +672,13 @@ fn draw_triangle_depth(
             w1 += w1_inc.x;
             w2 += w2_inc.x;
 
-            idx += STEP_X as usize;
+            x += STEP_X;
         }
         w0_row += w0_inc.y;
         w1_row += w1_inc.y;
         w2_row += w2_inc.y;
 
-        row_start += stride * STEP_Y as usize;
+        y += STEP_Y;
     }
 }
 

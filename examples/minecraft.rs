@@ -15,7 +15,7 @@ use rasterization::{
     obj::{Material, Obj},
     prim3d, shaders,
     utils::{Camera, FpvCamera},
-    vec::{Mat4x4, Vec2, Vec3, Vec4},
+    vec::{Mat4x4, Vec2, Vec3},
     vertex_shader_simd, IntoSimd, VertBuf, Vertex, VertexBuf,
 };
 
@@ -140,6 +140,7 @@ impl World {
             camera_transform,
             depth_buf.borrow(),
             &mut self.render_ctx,
+            f32::EPSILON,
         );
         for y in 0..pixels.height {
             for x in 0..pixels.width {
@@ -148,17 +149,16 @@ impl World {
         }
         println!("Rendering depth took {:?}", depth_start.elapsed());
 
-        prim3d::draw_triangles(
-            &self.vert_buf,
-            &self.index_buf,
-            &vert_shader,
-            &frag_shader,
-            pixels.borrow(),
-            depth_buf.borrow(),
-            &mut self.render_ctx,
-        );
+        // prim3d::draw_triangles(
+        //     &self.vert_buf,
+        //     &self.index_buf,
+        //     &vert_shader,
+        //     &frag_shader,
+        //     pixels.borrow(),
+        //     depth_buf.borrow(),
+        //     &mut self.render_ctx,
+        // );
 
-        /*
         for y in 0..pixels.height {
             for x in 0..pixels.width {
                 let depth = depth_buf[(x, y)].clamp(-1., 1.);
@@ -170,11 +170,10 @@ impl World {
                 pixels[(x, y)] = [color, color, color, 0xff];
             }
         }
-        */
     }
 
     fn render_with_shadows(&mut self, pixels: buf::PixelBuf) {
-        let depth_buf = buf::MatrixSliceMut::new(
+        let mut depth_buf = buf::MatrixSliceMut::new(
             &mut self.depth_buf,
             self.width as usize,
             self.height as usize,
@@ -193,14 +192,13 @@ impl World {
             );
 
             let light_transform = light_camera.transform_matrix();
-            prim3d::draw_triangles_depth(
-                &self.vert_buf,
+            prim3d::draw_triangles_depth_specialized(
+                &self.vert_buf.positions,
                 &self.index_buf,
-                &vertex_shader_simd!([light_transform: Mat4x4] |vertex: Vertex| -> Vec4 {
-                    light_transform.splat() * vertex.position
-                }),
+                light_transform,
                 shadow_buf.borrow(),
                 &mut self.render_ctx,
+                0.0,
             );
             // Pretty dumb way to make a circular spotlight
             let radius = shadow_buf.width as f32 * 0.5;
@@ -222,10 +220,10 @@ impl World {
         let near = 0.1;
         let far = 100.;
 
-        let vert_shader = shaders::lit::LitVertexShader::new(
-            self.camera.transform_matrix(near, far),
-            light_camera.transform_matrix(),
-        );
+        let camera_transform = self.camera.transform_matrix(near, far);
+
+        let vert_shader =
+            shaders::lit::LitVertexShader::new(camera_transform, light_camera.transform_matrix());
         let texture = &self.materials[0].map_kd;
         let (texture_pixels, _) = texture.as_chunks::<4>();
         let texture = buf::MatrixSlice::new(
@@ -240,6 +238,15 @@ impl World {
             Vec3::from([1., 1., 1.]),
             texture,
             shadow_map.borrow(),
+        );
+
+        prim3d::draw_triangles_depth_specialized(
+            &self.vert_buf.positions,
+            &self.index_buf,
+            camera_transform,
+            depth_buf.borrow(),
+            &mut self.render_ctx,
+            f32::EPSILON,
         );
 
         prim3d::draw_triangles(
@@ -352,6 +359,9 @@ fn main() {
                 (ElementState::Pressed, VirtualKeyCode::Left) => world.update_cursor(-20., 0.),
                 (ElementState::Pressed, VirtualKeyCode::Up) => world.update_cursor(0., 20.),
                 (ElementState::Pressed, VirtualKeyCode::Down) => world.update_cursor(0., -20.),
+                (ElementState::Pressed, VirtualKeyCode::H) => {
+                    world.enable_shadows = !world.enable_shadows
+                }
                 _ => (),
             },
             Event::MainEventsCleared => {
