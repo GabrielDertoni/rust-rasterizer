@@ -23,6 +23,7 @@ pub struct World {
     vert_buf: VertBuf,
     index_buf: Vec<[usize; 3]>,
     materials: Vec<Material>,
+    alpha_map: Vec<i8>,
     depth_buf: Vec<f32>,
     shadow_map: Vec<f32>,
     camera: FpvCamera,
@@ -51,10 +52,18 @@ impl World {
 
         let n_vertices = vert_buf.len();
         let ratio = width as f32 / height as f32;
+        let texture = &obj.materials[0].map_kd;
+        let mut alpha_map = vec![0_i8; (texture.width() * texture.height()) as usize];
+        for y in 0..texture.height() {
+            for x in 0..texture.width() {
+                alpha_map[(y * texture.width() + x) as usize] = texture.get_pixel(x, y).0[3] as i8;
+            }
+        }
         World {
             vert_buf,
             index_buf,
             materials: obj.materials,
+            alpha_map,
             depth_buf: vec![0.0; (width * height) as usize],
             shadow_map: vec![0.0; (width * height) as usize],
             camera: FpvCamera {
@@ -246,7 +255,7 @@ impl World {
             camera_transform,
             depth_buf.borrow(),
             &mut self.render_ctx,
-            f32::EPSILON,
+            1e-4,
         );
 
         prim3d::draw_triangles(

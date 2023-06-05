@@ -11,6 +11,7 @@
 pub mod buf;
 pub mod obj;
 pub mod prim3d;
+pub mod texture;
 pub mod utils;
 pub mod vec;
 
