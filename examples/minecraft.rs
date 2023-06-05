@@ -9,6 +9,7 @@ use winit::{
 };
 
 use std::time::{Duration, Instant};
+use std::ops::Range;
 
 use rasterization::{
     buf, clear_color,
@@ -19,10 +20,18 @@ use rasterization::{
     vertex_shader_simd, IntoSimd, VertBuf, Vertex, VertexBuf,
 };
 
+struct TexturedSubset {
+    material_idx: usize,
+    vert_buf: VertBuf,
+    index_buf: Vec<[usize; 3]>,
+    range: Range<usize>,
+}
+
 pub struct World {
     vert_buf: VertBuf,
     index_buf: Vec<[usize; 3]>,
     materials: Vec<Material>,
+    texture_subsets: Vec<TexturedSubset>,
     alpha_map: Vec<i8>,
     depth_buf: Vec<f32>,
     shadow_map: Vec<f32>,
@@ -59,18 +68,60 @@ impl World {
                 alpha_map[(y * texture.width() + x) as usize] = texture.get_pixel(x, y).0[3] as i8;
             }
         }
+
+        let texture_subsets = obj.use_material.into_iter()
+            .map(|usemtl| {
+                let Some(material_idx) = obj.materials.iter()
+                    .position(|mtl| mtl.name == usemtl.name) else {
+                        let names_found = obj.materials.iter().map(|mtl| mtl.name.as_str()).collect::<Vec<_>>();
+                        panic!("could not find material {} in .obj, found {:?}", usemtl.name, names_found);
+                    };
+                let mut lookup = index_buf[usemtl.range.clone()].iter().copied().flatten().collect::<Vec<_>>();
+                lookup.sort_unstable();
+                lookup.dedup();
+                let vert_buf = lookup
+                    .iter()
+                    .map(|&i| Vertex {
+                        position: vert_buf.positions[i],
+                        normal: vert_buf.normals[i],
+                        uv: vert_buf.uvs[i],
+                    })
+                    .collect();
+                let index_buf = index_buf[usemtl.range.clone()]
+                    .iter()
+                    .map(|tri| tri.map(|i| lookup.binary_search(&i).unwrap()))
+                    .collect();
+                TexturedSubset {
+                    material_idx,
+                    vert_buf,
+                    index_buf,
+                    range: usemtl.range,
+                }
+            })
+            .collect();
         World {
             vert_buf,
             index_buf,
             materials: obj.materials,
+            texture_subsets,
             alpha_map,
             depth_buf: vec![0.0; (width * height) as usize],
             shadow_map: vec![0.0; (width * height) as usize],
+            // camera: FpvCamera {
+            //     position: Vec3::from([-7.4, 30.8, 12.7]),
+            //     up: Vec3::from([0., 0., 1.]),
+            //     pitch: 87.4295,
+            //     yaw: -180.382,
+            //     sensitivity: 0.05,
+            //     speed: 5.,
+            //     fovy: 39.6,
+            //     ratio,
+            // },
             camera: FpvCamera {
-                position: Vec3::from([-7.4, 30.8, 12.7]),
+                position: Vec3::from([5., 7., -4.]),
                 up: Vec3::from([0., 0., 1.]),
-                pitch: 87.4295,
-                yaw: -180.382,
+                pitch: 92.,
+                yaw: 80.,
                 sensitivity: 0.05,
                 speed: 5.,
                 fovy: 39.6,
@@ -115,6 +166,7 @@ impl World {
             let render_time = self.last_render_times.iter().sum::<Duration>()
                 / self.last_render_times.len() as u32;
             println!("render time: {render_time:?}");
+            println!("FPS: {}", 1. / render_time.as_secs_f32());
         }
     }
 
@@ -133,51 +185,49 @@ impl World {
         let camera_transform = self.camera.transform_matrix(near, far);
 
         let vert_shader = shaders::textured::TexturedVertexShader::new(camera_transform);
-        let texture = &self.materials[0].map_kd;
-        let (texture_pixels, _) = texture.as_chunks::<4>();
-        let texture = buf::MatrixSlice::new(
-            texture_pixels,
-            texture.width() as usize,
-            texture.height() as usize,
-        );
-        let frag_shader = shaders::textured::TexturedFragmentShader::new(texture);
 
-        let depth_start = Instant::now();
-        prim3d::draw_triangles_depth_specialized(
-            &self.vert_buf.positions,
-            &self.index_buf,
-            camera_transform,
-            depth_buf.borrow(),
-            &mut self.render_ctx,
-            f32::EPSILON,
-        );
-        for y in 0..pixels.height {
-            for x in 0..pixels.width {
-                depth_buf[(x, y)] += f32::EPSILON;
-            }
-        }
-        println!("Rendering depth took {:?}", depth_start.elapsed());
+        for subset in &self.texture_subsets {
+            let texture = &self.materials[subset.material_idx].map_kd;
+            let (texture_pixels, _) = texture.as_chunks::<4>();
+            let texture = buf::MatrixSlice::new(
+                texture_pixels,
+                texture.width() as usize,
+                texture.height() as usize,
+            );
+            let frag_shader = shaders::textured::TexturedFragmentShader::new(texture);
 
-        // prim3d::draw_triangles(
-        //     &self.vert_buf,
-        //     &self.index_buf,
-        //     &vert_shader,
-        //     &frag_shader,
-        //     pixels.borrow(),
-        //     depth_buf.borrow(),
-        //     &mut self.render_ctx,
-        // );
-
-        for y in 0..pixels.height {
-            for x in 0..pixels.width {
-                let depth = depth_buf[(x, y)].clamp(-1., 1.);
-                let z =
-                    1. / ((depth - (far + near) / (far - near)) * (far - near) / (2. * far * near));
-                let color = (z + near) / (near - far);
-                let color = color * 255.;
-                let color = color as u8;
-                pixels[(x, y)] = [color, color, color, 0xff];
-            }
+            // let depth_start = Instant::now();
+            // prim3d::draw_triangles_depth_specialized(
+            //     &self.vert_buf.positions,
+            //     &self.index_buf,
+            //     camera_transform,
+            //     depth_buf.borrow(),
+            //     &mut self.render_ctx,
+            //     1e-4,
+            // );
+            // println!("Rendering depth took {:?}", depth_start.elapsed());
+    
+            prim3d::draw_triangles(
+                &subset.vert_buf,
+                &subset.index_buf,
+                &vert_shader,
+                &frag_shader,
+                pixels.borrow(),
+                depth_buf.borrow(),
+                &mut self.render_ctx,
+            );
+    
+            // for y in 0..pixels.height {
+            //     for x in 0..pixels.width {
+            //         let depth = depth_buf[(x, y)].clamp(-1., 1.);
+            //         let z =
+            //             1. / ((depth - (far + near) / (far - near)) * (far - near) / (2. * far * near));
+            //         let color = (z + near) / (near - far);
+            //         let color = color * 255.;
+            //         let color = color as u8;
+            //         pixels[(x, y)] = [color, color, color, 0xff];
+            //     }
+            // }
         }
     }
 

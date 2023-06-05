@@ -147,7 +147,7 @@ impl<'a> FragmentShader<TexturedAttributes> for TexturedFragmentShader<'a> {
         _pixel_coords: Vec<Simd<i32, 4>, 2>,
         pixels: &mut Simd<u32, 4>,
     ) {
-        let colors = self.texture.index_uv(attrs.uv, *mask);
+        let colors = self.texture.index_uv_repeat(attrs.uv, *mask);
         let colors = Simd::from(
             colors
                 .map(|el| u32::from_ne_bytes(el.to_array()))
