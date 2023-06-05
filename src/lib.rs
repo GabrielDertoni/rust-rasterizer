@@ -80,20 +80,17 @@ impl VertBuf {
             .collect::<std::vec::Vec<_>>();
         vert_idxs_set.sort_unstable();
         vert_idxs_set.dedup();
-        let mut vert_buf = VertBuf::with_capacity(vert_idxs_set.len());
-
-        for idxs in &vert_idxs_set {
-            vert_buf.push(Vertex {
+        let vert_buf = vert_idxs_set.iter()
+            .map(|idxs| Vertex {
                 position: obj.verts[idxs.position as usize],
                 normal: obj.normals[idxs.normal as usize],
                 uv: obj.uvs[idxs.uv as usize],
-            });
-        }
+            })
+            .collect();
 
-        let mut index_buf = std::vec::Vec::with_capacity(obj.tris.len());
-        for tri in &obj.tris {
-            index_buf.push(tri.map(|v| vert_idxs_set.binary_search(&v).unwrap()));
-        }
+        let index_buf = obj.tris.iter()
+            .map(|tri| tri.map(|v| vert_idxs_set.binary_search(&v).unwrap()))
+            .collect();
 
         (vert_buf, index_buf)
     }
@@ -114,6 +111,16 @@ impl VertexBuf for VertBuf {
         debug_assert_eq!(self.positions.len(), self.normals.len());
         debug_assert_eq!(self.positions.len(), self.uvs.len());
         self.positions.len()
+    }
+}
+
+impl FromIterator<Vertex> for VertBuf {
+    fn from_iter<T: IntoIterator<Item = Vertex>>(iter: T) -> Self {
+        let mut vert_buf = VertBuf::default();
+        for vertex in iter {
+            vert_buf.push(vertex)
+        }
+        vert_buf
     }
 }
 
