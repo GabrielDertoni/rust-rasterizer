@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use std::ops::Range;
 
 use rasterization::{
-    buf, clear_color,
+    texture::{BorrowedMutTexture, BorrowedTexture}, clear_color,
     obj::{Material, Obj},
     prim3d, shaders,
     utils::{Camera, FpvCamera},
@@ -22,8 +22,6 @@ use rasterization::{
 
 struct TexturedSubset {
     material_idx: usize,
-    vert_buf: VertBuf,
-    index_buf: Vec<[usize; 3]>,
     range: Range<usize>,
 }
 
@@ -43,7 +41,6 @@ pub struct World {
     pub enable_logging: bool,
     enable_shadows: bool,
     model: Mat4x4,
-    render_ctx: prim3d::RenderContext,
     width: u32,
     height: u32,
 }
@@ -69,36 +66,25 @@ impl World {
             }
         }
 
-        let texture_subsets = obj.use_material.into_iter()
+        let mut texture_subsets: Vec<TexturedSubset> = obj.use_material.into_iter()
             .map(|usemtl| {
                 let Some(material_idx) = obj.materials.iter()
                     .position(|mtl| mtl.name == usemtl.name) else {
                         let names_found = obj.materials.iter().map(|mtl| mtl.name.as_str()).collect::<Vec<_>>();
                         panic!("could not find material {} in .obj, found {:?}", usemtl.name, names_found);
                     };
-                let mut lookup = index_buf[usemtl.range.clone()].iter().copied().flatten().collect::<Vec<_>>();
-                lookup.sort_unstable();
-                lookup.dedup();
-                let vert_buf = lookup
-                    .iter()
-                    .map(|&i| Vertex {
-                        position: vert_buf.positions[i],
-                        normal: vert_buf.normals[i],
-                        uv: vert_buf.uvs[i],
-                    })
-                    .collect();
-                let index_buf = index_buf[usemtl.range.clone()]
-                    .iter()
-                    .map(|tri| tri.map(|i| lookup.binary_search(&i).unwrap()))
-                    .collect();
                 TexturedSubset {
                     material_idx,
-                    vert_buf,
-                    index_buf,
                     range: usemtl.range,
                 }
             })
             .collect();
+        if texture_subsets.len() == 0 {
+            texture_subsets.push(TexturedSubset {
+                material_idx: 0,
+                range: 0..index_buf.len(),
+            });
+        }
         World {
             vert_buf,
             index_buf,
@@ -134,7 +120,6 @@ impl World {
             enable_logging: true,
             enable_shadows: false,
             model: Mat4x4::identity(),
-            render_ctx: prim3d::RenderContext::alloc(n_vertices),
             width,
             height,
         }
@@ -143,16 +128,17 @@ impl World {
     pub fn render(&mut self, buf: &mut [u8], dt: Duration) {
         let start = Instant::now();
         let (pixels, _) = buf.as_chunks_mut::<4>();
-        let mut pixels = buf::PixelBuf::new(pixels, self.width as usize, self.height as usize);
+        let mut pixels = BorrowedMutTexture::from_mut_slice(self.width as usize, self.height as usize, pixels);
 
         self.camera.move_delta(self.axis * dt.as_secs_f32());
 
-        clear_color(pixels.borrow(), 0x00_00_00_ff);
+        let fog_color = 0x61b7e8ff;
+        clear_color(pixels.borrow_mut(), 0x61b7e8ff);
 
         let draw_timer = Instant::now();
 
         if self.enable_shadows {
-            self.render_with_shadows(pixels);
+            // self.render_with_shadows(pixels);
         } else {
             self.render_without_shadows(pixels);
         }
@@ -170,29 +156,39 @@ impl World {
         }
     }
 
-    fn render_without_shadows(&mut self, mut pixels: buf::PixelBuf) {
-        let mut depth_buf = buf::MatrixSliceMut::new(
-            &mut self.depth_buf,
+    fn render_without_shadows(&mut self, pixels: BorrowedMutTexture<[u8; 4]>) {
+        use rasterization::pipeline::Pipeline;
+        use rasterization::vec::Vec;
+
+        let fog_color = 0x61b7e8ff_u32;
+        let fog_color = Vec::from(fog_color.to_be_bytes()).map(|chan| chan as f32 / 255.);
+        let mut depth_buf = BorrowedMutTexture::from_mut_slice(
             self.width as usize,
             self.height as usize,
+            &mut self.depth_buf,
         );
 
         depth_buf.as_slice_mut().fill(1.0);
 
         let near = 0.1;
-        let far = 100.;
+        let far = 50.;
 
         let camera_transform = self.camera.transform_matrix(near, far);
 
         let vert_shader = shaders::textured::TexturedVertexShader::new(camera_transform);
+        let mut pipeline = Pipeline::new(&self.vert_buf, &self.index_buf);
+
+        pipeline.set_color_buffer(pixels);
+        pipeline.set_depth_buffer(depth_buf);
+        let mut pipeline = pipeline.process_vertices(&vert_shader);
 
         for subset in &self.texture_subsets {
             let texture = &self.materials[subset.material_idx].map_kd;
             let (texture_pixels, _) = texture.as_chunks::<4>();
-            let texture = buf::MatrixSlice::new(
-                texture_pixels,
+            let texture = BorrowedTexture::from_slice(
                 texture.width() as usize,
                 texture.height() as usize,
+                texture_pixels,
             );
             let frag_shader = shaders::textured::TexturedFragmentShader::new(texture);
 
@@ -206,16 +202,33 @@ impl World {
             //     1e-4,
             // );
             // println!("Rendering depth took {:?}", depth_start.elapsed());
+
+            pipeline.draw(subset.range.clone(), &frag_shader);
     
-            prim3d::draw_triangles(
-                &subset.vert_buf,
-                &subset.index_buf,
-                &vert_shader,
-                &frag_shader,
-                pixels.borrow(),
-                depth_buf.borrow(),
-                &mut self.render_ctx,
-            );
+            // metrics.combine(prim3d::draw_triangles_basic(
+            //     &self.vert_buf,
+            //     &self.index_buf[subset.range.clone()],
+            //     &vert_shader,
+            //     &move |attr: shaders::textured::TexturedAttributes| {
+            //         let [u, v] = attr.uv.to_array();
+            //         let u = u % 1.;
+            //         let u = if u < 0. { 1. + u } else { u };
+            //         let v = v % 1.;
+            //         let v = if v < 0. { 1. + v } else { v };
+            //         let x = (u * texture.width as f32) as usize;
+            //         let y = ((1. - v) * texture.height as f32) as usize;
+            //         let x = x.clamp(0, texture.width-1);
+            //         let y = y.clamp(0, texture.height-1);
+            //         let z = (1. / attr.position_ndc.w - near) / (far - near);
+            //         let z = z.powi(4);
+            //         let tex = Vec::from(texture[(x, y)]).map(|chan| chan as f32 / 255.);
+            //         let color = tex * (1. - z) + fog_color * z;
+            //         Vec4::from([color.x, color.y, color.z, tex.w])
+            //     },
+            //     pixels.borrow(),
+            //     depth_buf.borrow(),
+            //     &mut self.render_ctx,
+            // ));
     
             // for y in 0..pixels.height {
             //     for x in 0..pixels.width {
@@ -229,94 +242,9 @@ impl World {
             //     }
             // }
         }
-    }
-
-    fn render_with_shadows(&mut self, pixels: buf::PixelBuf) {
-        let mut depth_buf = buf::MatrixSliceMut::new(
-            &mut self.depth_buf,
-            self.width as usize,
-            self.height as usize,
-        );
-
-        let light_pos = Vec3::from([0., -3.77, 6.27]);
-        let light_camera =
-            Camera::from_blender(light_pos, Vec3::from([33.9, 0., 0.]), 45., 1., 1., 100.);
-
-        let shadow_map = {
-            self.shadow_map.fill(1.0);
-            let mut shadow_buf = buf::MatrixSliceMut::new(
-                &mut self.shadow_map,
-                self.width as usize,
-                self.height as usize,
-            );
-
-            let light_transform = light_camera.transform_matrix();
-            prim3d::draw_triangles_depth_specialized(
-                &self.vert_buf.positions,
-                &self.index_buf,
-                light_transform,
-                shadow_buf.borrow(),
-                &mut self.render_ctx,
-                0.0,
-            );
-            // Pretty dumb way to make a circular spotlight
-            let radius = shadow_buf.width as f32 * 0.5;
-            let circle_center =
-                Vec2::from([shadow_buf.width as f32 / 2., shadow_buf.height as f32 / 2.]);
-            for y in 0..shadow_buf.height {
-                for x in 0..shadow_buf.width {
-                    let p = Vec2::from([x as f32, y as f32]);
-                    if (p - circle_center).mag_sq() >= radius * radius {
-                        shadow_buf[(x, y)] = -1.0;
-                    }
-                }
-            }
-            buf::MatrixSlice::new(&self.shadow_map, depth_buf.width, depth_buf.height)
-        };
-
-        depth_buf.as_slice_mut().fill(1.0);
-
-        let near = 0.1;
-        let far = 100.;
-
-        let camera_transform = self.camera.transform_matrix(near, far);
-
-        let vert_shader =
-            shaders::lit::LitVertexShader::new(camera_transform, light_camera.transform_matrix());
-        let texture = &self.materials[0].map_kd;
-        let (texture_pixels, _) = texture.as_chunks::<4>();
-        let texture = buf::MatrixSlice::new(
-            texture_pixels,
-            texture.width() as usize,
-            texture.height() as usize,
-        );
-        let frag_shader = shaders::lit::LitFragmentShader::new(
-            self.camera.position,
-            self.model,
-            light_pos,
-            Vec3::from([1., 1., 1.]),
-            texture,
-            shadow_map.borrow(),
-        );
-
-        prim3d::draw_triangles_depth_specialized(
-            &self.vert_buf.positions,
-            &self.index_buf,
-            camera_transform,
-            depth_buf.borrow(),
-            &mut self.render_ctx,
-            1e-4,
-        );
-
-        prim3d::draw_triangles(
-            &self.vert_buf,
-            &self.index_buf,
-            &vert_shader,
-            &frag_shader,
-            pixels,
-            depth_buf,
-            &mut self.render_ctx,
-        );
+        pipeline.finalize();
+        let metrics = pipeline.get_metrics();
+        println!("{metrics}");
     }
 
     pub fn toggle_pause(&mut self) {

@@ -182,6 +182,12 @@ impl<const M: usize, const N: usize> Mat<i32, M, N> {
     }
 }
 
+impl<const M: usize, const N: usize> Mat<u8, M, N> {
+    pub fn to_f32(self) -> Mat<f32, M, N> {
+        self.map(|el| el as f32)
+    }
+}
+
 impl<const M: usize, const N: usize, const LANES: usize> Mat<Simd<i32, LANES>, M, N>
 where
     LaneCount<LANES>: SupportedLaneCount,

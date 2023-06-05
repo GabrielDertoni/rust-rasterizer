@@ -14,6 +14,8 @@ pub mod prim3d;
 pub mod texture;
 pub mod utils;
 pub mod vec;
+pub mod pipeline;
+pub mod simd_config;
 
 // TODO: Move to separate crate
 pub mod frag_shaders;
@@ -24,7 +26,8 @@ pub type Pixel = [u8; 4];
 
 use std::simd::{LaneCount, Mask, Simd, SimdElement, SupportedLaneCount};
 
-use vec::{Mat4x4, Vec, Vec2, Vec3, Vec4, Vec4xN};
+use texture::BorrowedMutTexture;
+use vec::{Mat4x4, Vec, Vec2i, Vec2, Vec3, Vec4, Vec4xN};
 
 pub fn triangles_iter<'a, V>(
     vert: &'a [V],
@@ -34,7 +37,7 @@ pub fn triangles_iter<'a, V>(
         .map(|&[p0, p1, p2]| [&vert[p0 as usize], &vert[p1 as usize], &vert[p2 as usize]])
 }
 
-pub fn clear_color(pixels: buf::PixelBuf, color: u32) {
+pub fn clear_color(mut pixels: BorrowedMutTexture<[u8; 4]>, color: u32) {
     for pixel in pixels.as_slice_mut() {
         *pixel = color.to_be_bytes();
     }
@@ -213,6 +216,10 @@ pub trait FragmentShader<A: Attributes> {
 
         *pixels = (colors & mask) + (*pixels & !mask)
     }
+
+    fn exec_basic(&self, attrs: A) -> Vec4 {
+        todo!();
+    }
 }
 
 pub trait VertexShader<Vertex: IntoSimd> {
@@ -320,6 +327,8 @@ pub trait Attributes: IntoSimd + Sized {
     where
         LaneCount<LANES>: SupportedLaneCount;
 
+    fn interpolate_basic(p0: &Self, p1: &Self, p2: &Self, w: Vec<f32, 3>) -> Self;
+
     fn position(&self) -> &Vec4;
     fn position_mut(&mut self) -> &mut Vec4;
 }
@@ -336,6 +345,10 @@ impl Attributes for Vec4 {
         LaneCount<LANES>: SupportedLaneCount,
     {
         w.x * p0.splat() + w.y * p1.splat() + w.z * p2.splat()
+    }
+
+    fn interpolate_basic(&p0: &Self, &p1: &Self, &p2: &Self, w: Vec<f32, 3>) -> Self {
+        w.x * p0 + w.y * p1 + w.z * p2
     }
 
     fn position(&self) -> &Vec4 {

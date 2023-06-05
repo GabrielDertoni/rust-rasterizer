@@ -1,6 +1,6 @@
 use crate::{
-    buf::Texture,
-    vec::{Mat4x4, Vec, Vec2, Vec3xN, Vec4},
+    texture::{BorrowedTextureRGBA, TextureWrap},
+    vec::{Mat4x4, Vec, Vec2i, Vec2, Vec3xN, Vec4},
     Attributes, FragmentShader, IntoSimd, StructureOfArray, Vertex, VertexShader, VertexSimd,
 };
 
@@ -12,74 +12,6 @@ pub struct TexturedAttributes {
     pub position_ndc: Vec4,
     pub uv: Vec2,
 }
-
-/*
-pub struct TexturedAttributesSimd<const LANES: usize>
-where
-    LaneCount<LANES>: SupportedLaneCount,
-{
-    pub uv: Vec2xN<LANES>,
-}
-
-impl IntoSimd for TexturedAttributes {
-    type Simd<const LANES: usize> = TexturedAttributesSimd<LANES>
-    where
-        LaneCount<LANES>: SupportedLaneCount;
-
-    fn splat<const LANES: usize>(self) -> Self::Simd<LANES>
-    where
-        LaneCount<LANES>: SupportedLaneCount,
-    {
-        TexturedAttributesSimd {
-            uv: self.uv.splat(),
-        }
-    }
-}
-
-impl<const LANES: usize> StructureOfArray<LANES> for TexturedAttributesSimd<LANES>
-where
-    LaneCount<LANES>: SupportedLaneCount,
-{
-    type Structure = TexturedAttributes;
-
-    fn from_array(array: [Self::Structure; LANES]) -> Self {
-        TexturedAttributesSimd {
-            uv: Vec2xN::from_array(array.map(|el| el.uv)),
-        }
-    }
-
-    fn index(&self, i: usize) -> Self::Structure {
-        TexturedAttributes {
-            position_ndc: todo!(),
-            uv: self.uv.index(i),
-        }
-    }
-}
-
-impl Attributes for TexturedAttributes {
-    fn interpolate<const LANES: usize>(
-        p0: &Self,
-        p1: &Self,
-        p2: &Self,
-        w: Vec3xN<LANES>,
-    ) -> Self::Simd<LANES>
-    where
-        LaneCount<LANES>: SupportedLaneCount,
-    {
-        TexturedAttributesSimd {
-            uv: w.x * p0.uv.splat() + w.y * p1.uv.splat() + w.z * p2.uv.splat(),
-        }
-    }
-
-    fn position(&self) -> &Vec4 {
-        &self.position_ndc
-    }
-
-    fn position_mut(&mut self) -> &mut Vec4 {
-        &mut self.position_ndc
-    }
-}
-*/
 
 pub struct TexturedVertexShader {
     transform: Mat4x4,
@@ -116,11 +48,11 @@ impl VertexShader<Vertex> for TexturedVertexShader {
 }
 
 pub struct TexturedFragmentShader<'a> {
-    texture: Texture<'a>,
+    texture: BorrowedTextureRGBA<'a>,
 }
 
 impl<'a> TexturedFragmentShader<'a> {
-    pub fn new(texture: Texture<'a>) -> Self {
+    pub fn new(texture: BorrowedTextureRGBA<'a>) -> Self {
         TexturedFragmentShader { texture }
     }
 }
@@ -147,7 +79,7 @@ impl<'a> FragmentShader<TexturedAttributes> for TexturedFragmentShader<'a> {
         _pixel_coords: Vec<Simd<i32, 4>, 2>,
         pixels: &mut Simd<u32, 4>,
     ) {
-        let colors = self.texture.index_uv_repeat(attrs.uv, *mask);
+        let colors = self.texture.simd_index_uv(attrs.uv, *mask);
         let colors = Simd::from(
             colors
                 .map(|el| u32::from_ne_bytes(el.to_array()))
@@ -165,5 +97,9 @@ impl<'a> FragmentShader<TexturedAttributes> for TexturedFragmentShader<'a> {
         let mask = Simd::splat(u32::from_ne_bytes(mask.to_int().cast().to_array()));
 
         *pixels = (colors & mask) + (*pixels & !mask);
+    }
+
+    fn exec_basic(&self, attrs: TexturedAttributes) -> Vec4 {
+        self.texture.index_uv(attrs.uv, TextureWrap::Repeat)
     }
 }
