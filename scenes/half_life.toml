@@ -1,0 +1,12 @@
+[model]
+path = "../models/half_life/half_life.obj"
+
+[camera]
+type = "fpv"
+position = [5.0, 7.0, -4.0]
+up = [0.0, 0.0, 1.0]
+pitch = 92
+yaw = 80.0
+fovy = 39.6
+sensitivity = 0.05
+speed = 5.0
