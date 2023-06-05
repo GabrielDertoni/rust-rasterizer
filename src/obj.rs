@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::ops::Range;
 
 use anyhow::{anyhow, Context, Result};
 
@@ -29,8 +30,15 @@ pub struct Obj {
     pub uvs: Vec<Vec2>,
     pub tris: Vec<[Index; 3]>,
     pub materials: Vec<Material>,
+    pub use_material: Vec<UseMaterial>,
     has_normals: bool,
     has_uvs: bool,
+}
+
+pub struct UseMaterial {
+    pub name: String,
+    /// Range in the `tris` buffer.
+    pub range: Range<usize>,
 }
 
 impl Obj {
@@ -43,6 +51,8 @@ impl Obj {
         let mut uvs = Vec::new();
         let mut tris = Vec::new();
         let mut materials = Vec::new();
+        let mut use_material = Vec::new();
+        let mut curr_material = None;
         for (linenum, line) in obj.lines().enumerate() {
             let linenum = linenum + 1;
             let mut it = line.split_ascii_whitespace();
@@ -72,6 +82,16 @@ impl Obj {
                         .ok_or_else(|| anyhow!("expected .mtl file name at {linenum}:{path:?}"))?;
                     Material::load_lib(root.join(fname).as_ref(), &mut materials)?;
                 }
+                Some("usemtl") => {
+                    if let Some((name, start)) = curr_material.take() {
+                        use_material.push(UseMaterial {
+                            name,
+                            range: start..tris.len(),
+                        })
+                    }
+                    let name = it.next().ok_or_else(|| anyhow!("expected a material name"))?;
+                    curr_material.replace((name.to_string(), tris.len()));
+                }
                 Some("#") => continue,
                 _ => continue,
             }
@@ -85,6 +105,12 @@ impl Obj {
         if !has_uvs {
             uvs.push(Vec2::zero());
         }
+        if let Some((name, start)) = curr_material.take() {
+            use_material.push(UseMaterial {
+                name,
+                range: start..tris.len(),
+            })
+        }
         let obj = Obj {
             verts,
             normals,
@@ -93,6 +119,7 @@ impl Obj {
             materials,
             has_normals,
             has_uvs,
+            use_material,
         };
         if !obj.check() {
             return Err(anyhow!("failed in bounds check"));
@@ -239,7 +266,7 @@ impl Material {
             std::fs::read_to_string(path).with_context(|| anyhow!("failed to open {path:?}"))?;
         let root = path.parent().unwrap(); // we know it's a file name
 
-        let mut lines = contents.lines();
+        let mut lines = contents.lines().peekable();
         while let Some(line) = lines.next() {
             let line = line.trim();
             let mut spaces = line.split_ascii_whitespace();
@@ -260,11 +287,9 @@ impl Material {
 fn parse_material<'a>(
     root: &Path,
     name: String,
-    lines: impl Iterator<Item = &'a str>,
+    it: &mut std::iter::Peekable<impl Iterator<Item = &'a str>>,
 ) -> Result<Material> {
     use std::collections::HashMap;
-
-    let mut it = lines.peekable();
 
     let mut attrs = HashMap::new();
 
