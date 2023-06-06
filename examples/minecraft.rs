@@ -12,17 +12,18 @@ use std::time::{Duration, Instant};
 
 use rasterization::{
     buf, clear_color,
-    obj::{Obj, Material},
+    obj::{Material, Obj},
     prim3d, shaders,
     utils::{Camera, FpvCamera},
     vec::{Mat4x4, Vec2, Vec3},
-    VertexBuf, VertBuf, Vertex,
+    vertex_shader_simd, IntoSimd, VertBuf, Vertex, VertexBuf,
 };
 
 pub struct World {
     vert_buf: VertBuf,
     index_buf: Vec<[usize; 3]>,
     materials: Vec<Material>,
+    alpha_map: Vec<i8>,
     depth_buf: Vec<f32>,
     shadow_map: Vec<f32>,
     camera: FpvCamera,
@@ -45,32 +46,24 @@ impl World {
             obj.compute_normals();
         }
 
-        let mut vert_idxs_set = obj.tris.iter().copied().flatten().collect::<Vec<_>>();
-        vert_idxs_set.sort_unstable();
-        vert_idxs_set.dedup();
-        let mut vert_buf = VertBuf::with_capacity(vert_idxs_set.len());
-
-        for idxs in &vert_idxs_set {
-            vert_buf.push(Vertex {
-                position: obj.verts[idxs.position as usize],
-                normal: obj.normals[idxs.normal as usize],
-                uv: obj.uvs[idxs.uv as usize],
-            });
-        }
-
-        let mut index_buf = Vec::with_capacity(obj.tris.len());
-        for tri in &obj.tris {
-            index_buf.push(tri.map(|v| vert_idxs_set.binary_search(&v).unwrap()));
-        }
+        let (vert_buf, index_buf) = VertBuf::from_obj(&obj);
 
         println!("Initially had {} positions, {} normals and {} uvs. Now converted into {} distict vertices", obj.verts.len(), obj.normals.len(), obj.uvs.len(), vert_buf.len());
 
         let n_vertices = vert_buf.len();
         let ratio = width as f32 / height as f32;
+        let texture = &obj.materials[0].map_kd;
+        let mut alpha_map = vec![0_i8; (texture.width() * texture.height()) as usize];
+        for y in 0..texture.height() {
+            for x in 0..texture.width() {
+                alpha_map[(y * texture.width() + x) as usize] = texture.get_pixel(x, y).0[3] as i8;
+            }
+        }
         World {
             vert_buf,
             index_buf,
             materials: obj.materials,
+            alpha_map,
             depth_buf: vec![0.0; (width * height) as usize],
             shadow_map: vec![0.0; (width * height) as usize],
             camera: FpvCamera {
@@ -125,8 +118,8 @@ impl World {
         }
     }
 
-    fn render_without_shadows(&mut self, pixels: buf::PixelBuf) {
-        let depth_buf = buf::MatrixSliceMut::new(
+    fn render_without_shadows(&mut self, mut pixels: buf::PixelBuf) {
+        let mut depth_buf = buf::MatrixSliceMut::new(
             &mut self.depth_buf,
             self.width as usize,
             self.height as usize,
@@ -137,7 +130,9 @@ impl World {
         let near = 0.1;
         let far = 100.;
 
-        let vert_shader = shaders::textured::TexturedVertexShader::new(self.camera.transform_matrix(near, far));
+        let camera_transform = self.camera.transform_matrix(near, far);
+
+        let vert_shader = shaders::textured::TexturedVertexShader::new(camera_transform);
         let texture = &self.materials[0].map_kd;
         let (texture_pixels, _) = texture.as_chunks::<4>();
         let texture = buf::MatrixSlice::new(
@@ -147,19 +142,47 @@ impl World {
         );
         let frag_shader = shaders::textured::TexturedFragmentShader::new(texture);
 
-        prim3d::draw_triangles(
-            &self.vert_buf,
+        let depth_start = Instant::now();
+        prim3d::draw_triangles_depth_specialized(
+            &self.vert_buf.positions,
             &self.index_buf,
-            &vert_shader,
-            &frag_shader,
-            pixels,
-            depth_buf,
+            camera_transform,
+            depth_buf.borrow(),
             &mut self.render_ctx,
+            f32::EPSILON,
         );
+        for y in 0..pixels.height {
+            for x in 0..pixels.width {
+                depth_buf[(x, y)] += f32::EPSILON;
+            }
+        }
+        println!("Rendering depth took {:?}", depth_start.elapsed());
+
+        // prim3d::draw_triangles(
+        //     &self.vert_buf,
+        //     &self.index_buf,
+        //     &vert_shader,
+        //     &frag_shader,
+        //     pixels.borrow(),
+        //     depth_buf.borrow(),
+        //     &mut self.render_ctx,
+        // );
+
+        for y in 0..pixels.height {
+            for x in 0..pixels.width {
+                let depth = depth_buf[(x, y)].clamp(-1., 1.);
+                let z =
+                    1. / ((depth - (far + near) / (far - near)) * (far - near) / (2. * far * near));
+                let color = (z + near) / (near - far);
+                let color = color * 255.;
+                let color = color as u8;
+                pixels[(x, y)] = [color, color, color, 0xff];
+            }
+        }
     }
 
     fn render_with_shadows(&mut self, pixels: buf::PixelBuf) {
-        let depth_buf = buf::MatrixSliceMut::new(
+        let mut depth_buf = buf::MatrixSliceMut::new(
             &mut self.depth_buf,
             self.width as usize,
             self.height as usize,
@@ -178,11 +201,13 @@ impl World {
             );
 
             let light_transform = light_camera.transform_matrix();
-            prim3d::draw_triangles_depth(
-                &self.vert_buf,
+            prim3d::draw_triangles_depth_specialized(
+                &self.vert_buf.positions,
                 &self.index_buf,
-                &|vertex: Vertex| light_transform * vertex.position,
+                light_transform,
                 shadow_buf.borrow(),
+                &mut self.render_ctx,
+                0.0,
             );
             // Pretty dumb way to make a circular spotlight
             let radius = shadow_buf.width as f32 * 0.5;
@@ -204,10 +229,10 @@ impl World {
         let near = 0.1;
         let far = 100.;
 
-        let vert_shader = shaders::lit::LitVertexShader::new(
-            self.camera.transform_matrix(near, far),
-            light_camera.transform_matrix(),
-        );
+        let camera_transform = self.camera.transform_matrix(near, far);
+
+        let vert_shader =
+            shaders::lit::LitVertexShader::new(camera_transform, light_camera.transform_matrix());
         let texture = &self.materials[0].map_kd;
         let (texture_pixels, _) = texture.as_chunks::<4>();
         let texture = buf::MatrixSlice::new(
@@ -222,6 +247,15 @@ impl World {
             Vec3::from([1., 1., 1.]),
             texture,
             shadow_map.borrow(),
+        );
+
+        prim3d::draw_triangles_depth_specialized(
+            &self.vert_buf.positions,
+            &self.index_buf,
+            camera_transform,
+            depth_buf.borrow(),
+            &mut self.render_ctx,
+            1e-4,
         );
 
         prim3d::draw_triangles(
@@ -329,6 +363,13 @@ fn main() {
                 (ElementState::Pressed, VirtualKeyCode::D) => world.axis.x = 1.0,
                 (ElementState::Released, VirtualKeyCode::A | VirtualKeyCode::D) => {
                     world.axis.x = 0.0
+                }
+                (ElementState::Pressed, VirtualKeyCode::Right) => world.update_cursor(20., 0.),
+                (ElementState::Pressed, VirtualKeyCode::Left) => world.update_cursor(-20., 0.),
+                (ElementState::Pressed, VirtualKeyCode::Up) => world.update_cursor(0., 20.),
+                (ElementState::Pressed, VirtualKeyCode::Down) => world.update_cursor(0., -20.),
+                (ElementState::Pressed, VirtualKeyCode::H) => {
+                    world.enable_shadows = !world.enable_shadows
                 }
                 _ => (),
             },

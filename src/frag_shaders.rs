@@ -1,6 +1,6 @@
 use crate::{
     vec::{Mat4x4, Vec, Vec3},
-    FragmentShader, SimdAttrs,
+    FragmentShader, IntoSimd, Vertex, VertexSimd,
 };
 
 use std::simd::{LaneCount, Mask, Simd, SupportedLaneCount};
@@ -122,16 +122,12 @@ impl FakeLitFragShader {
     }
 }
 
-impl FragmentShader for FakeLitFragShader {
-    type SimdAttr<const LANES: usize> = SimdAttrs<LANES>
-    where
-        LaneCount<LANES>: SupportedLaneCount;
-
+impl FragmentShader<Vertex> for FakeLitFragShader {
     fn exec<const LANES: usize>(
         &self,
         _mask: Mask<i32, LANES>,
         _pixel_coords: Vec<Simd<i32, LANES>, 2>,
-        attrs: SimdAttrs<LANES>,
+        attrs: VertexSimd<LANES>,
     ) -> Vec<Simd<f32, LANES>, 4>
     where
         LaneCount<LANES>: SupportedLaneCount,
@@ -152,16 +148,12 @@ impl ShowNormalsFragShader {
     }
 }
 
-impl FragmentShader for ShowNormalsFragShader {
-    type SimdAttr<const LANES: usize> = SimdAttrs<LANES>
-    where
-        LaneCount<LANES>: SupportedLaneCount;
-
+impl FragmentShader<Vertex> for ShowNormalsFragShader {
     fn exec<const LANES: usize>(
         &self,
         _mask: Mask<i32, LANES>,
         _pixel_coords: Vec<Simd<i32, LANES>, 2>,
-        attrs: SimdAttrs<LANES>,
+        attrs: VertexSimd<LANES>,
     ) -> Vec<Simd<f32, LANES>, 4>
     where
         LaneCount<LANES>: SupportedLaneCount,
@@ -185,16 +177,12 @@ impl ShowGlobalNormalsFragShader {
     }
 }
 
-impl FragmentShader for ShowGlobalNormalsFragShader {
-    type SimdAttr<const LANES: usize> = SimdAttrs<LANES>
-    where
-        LaneCount<LANES>: SupportedLaneCount;
-
+impl FragmentShader<Vertex> for ShowGlobalNormalsFragShader {
     fn exec<const LANES: usize>(
         &self,
         _mask: Mask<i32, LANES>,
         _pixel_coords: Vec<Simd<i32, LANES>, 2>,
-        attrs: SimdAttrs<LANES>,
+        attrs: VertexSimd<LANES>,
     ) -> Vec<Simd<f32, LANES>, 4>
     where
         LaneCount<LANES>: SupportedLaneCount,
