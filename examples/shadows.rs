@@ -3,7 +3,7 @@
 use pixels::{Pixels, SurfaceTexture};
 use winit::{
     dpi::{LogicalSize, PhysicalPosition},
-    event::{DeviceEvent, ElementState, Event, KeyboardInput, VirtualKeyCode, WindowEvent},
+    event::{ElementState, Event, KeyboardInput, VirtualKeyCode, WindowEvent},
     event_loop::EventLoop,
     window::{CursorGrabMode, WindowBuilder},
 };
@@ -115,10 +115,6 @@ impl World {
             self.height as usize,
         );
 
-        let model = Mat4x4::rotation_y(self.theta)
-            * Mat4x4::rotation_x(self.theta)
-            * Vec3::repeat(1.0 / self.scale).to_scale();
-
         let draw_timer = Instant::now();
 
         let light_pos = Vec3::from([0., -3.77, 6.27]);
@@ -160,10 +156,20 @@ impl World {
         let near = 0.1;
         let far = 100.;
 
+        let vert_shader = shaders::lit::gouraud::VertexShader::new(
+            self.camera.transform_matrix(near, far),
+            light_camera.transform_matrix(),
+            light_pos,
+            Vec3::from([1., 1., 1.]),
+        );
+
+        /*
         let vert_shader = shaders::lit::LitVertexShader::new(
             self.camera.transform_matrix(near, far),
             light_camera.transform_matrix(),
         );
+        */
+
         let texture = &self.materials[0].map_kd;
         let (texture_pixels, _) = texture.as_chunks::<4>();
         let texture = buf::MatrixSlice::new(
@@ -171,6 +177,12 @@ impl World {
             texture.width() as usize,
             texture.height() as usize,
         );
+
+        let frag_shader = shaders::lit::gouraud::FragmentShader::new(
+            texture,
+            shadow_map.borrow(),
+        );
+        /*
         let frag_shader = shaders::lit::LitFragmentShader::new(
             self.camera.position,
             model,
@@ -179,6 +191,7 @@ impl World {
             texture,
             shadow_map.borrow(),
         );
+        */
 
         prim3d::draw_triangles(
             &self.vert_buf,
@@ -310,11 +323,18 @@ fn main() {
                 window.request_redraw()
             }
             Event::RedrawRequested(_) => pixels.render().unwrap(),
-            Event::DeviceEvent {
-                event: DeviceEvent::MouseMotion { delta: (dx, dy) },
+            Event::WindowEvent {
+                event:
+                    WindowEvent::CursorMoved {
+                        position,
+                        ..
+                    },
                 ..
             } => {
-                world.update_cursor(dx as f32, dy as f32);
+                let position = Vec2::from([position.x as f32, position.y as f32]);
+                let screen_center = Vec2::from([wsize.width as f32, wsize.height as f32]) / 2.;
+                let delta = position - screen_center;
+                world.update_cursor(delta.x, delta.y);
             }
             _ => (),
         }
