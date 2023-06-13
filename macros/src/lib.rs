@@ -52,7 +52,9 @@ pub fn into_simd_derive(input: proc_macro::TokenStream) -> proc_macro::TokenStre
                         std::simd::LaneCount<LANES>: std::simd::SupportedLaneCount,
                         #(#constraints,)*
                     {
-                        #(#field_decls,)*
+                        #(
+                            #field_decls,
+                        )*
                     }
                 },
                 quote! {

@@ -1,6 +1,6 @@
 use crate::{
     texture::{BorrowedTextureRGBA, TextureWrap},
-    vec::{Mat4x4, Vec, Vec2i, Vec2, Vec3xN, Vec4},
+    vec::{Mat4x4, Vec, Vec2, Vec4},
     Attributes, FragmentShader, IntoSimd, StructureOfArray, Vertex, VertexShader, VertexSimd,
 };
 
@@ -33,6 +33,7 @@ impl VertexShader<Vertex> for TexturedVertexShader {
         }
     }
 
+    /*
     fn exec_simd<const LANES: usize>(
         &self,
         vertex: VertexSimd<LANES>,
@@ -45,6 +46,7 @@ impl VertexShader<Vertex> for TexturedVertexShader {
             uv: vertex.uv,
         }
     }
+    */
 }
 
 pub struct TexturedFragmentShader<'a> {

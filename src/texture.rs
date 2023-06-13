@@ -1,6 +1,6 @@
 use std::{
     marker::PhantomData,
-    ops::{Index, IndexMut},
+    ops::{Index, IndexMut, Bound, RangeBounds, Range},
     simd::{LaneCount, Simd, Mask, SupportedLaneCount},
 };
 
@@ -123,6 +123,41 @@ where
             std::slice::from_raw_parts_mut(self.storage.ptr_mut(), self.len())
         }
     }
+
+    pub fn copy_from<S2, I2, Width2, Height2>(&mut self, other: &Texture<T, S2, I2, Width2, Height2>)
+    where
+        T: Copy,
+        S: StorageMut,
+        Width2: Dim,
+        Height2: Dim,
+        S2: Storage<Elem = T>,
+        I2: IndexLayout,
+    {
+        assert_eq!(self.width(), other.width());
+        assert_eq!(self.height(), other.height());
+        for y in 0..self.height() {
+            for x in 0..self.width() {
+                self[(x, y)] = other[(x, y)];
+            }
+        }
+    }
+
+    // TODO: move this method to the `IndexLayout` trait
+    pub fn get_index_from_uv(&self, uv: Vec2, wrap: TextureWrap) -> Vec<usize, 2> {
+        let [u, v] = uv.to_array();
+
+        let (u, v) = match wrap {
+            TextureWrap::Clamp => (u.clamp(0., 1.), v.clamp(0., 1.)),
+            TextureWrap::Repeat => (u.rem_euclid(1.), v.rem_euclid(1.)),
+        };
+
+        let x = (u * self.width() as f32) as usize;
+        let y = ((1. - v) * self.height() as f32) as usize;
+
+        let x = x.clamp(0, self.width()-1);
+        let y = y.clamp(0, self.height()-1);
+        Vec::from([x, y])
+    }
 }
 
 pub enum TextureWrap {
@@ -140,20 +175,8 @@ where
     /// Index the matrix slice with uv coordinates. The access is repeated if the index is out of bounds.
     #[inline]
     pub fn index_uv(&self, uv: Vec2, wrap: TextureWrap) -> Vec<f32, 4> {
-        let [u, v] = uv.to_array();
-
-        let (u, v) = match wrap {
-            TextureWrap::Clamp => (u.clamp(0., 1.), v.clamp(0., 1.)),
-            TextureWrap::Repeat => (u.rem_euclid(1.), v.rem_euclid(1.)),
-        };
-
-        let x = (u * self.width() as f32) as usize;
-        let y = ((1. - v) * self.height() as f32) as usize;
-
-        let x = x.clamp(0, self.width()-1);
-        let y = y.clamp(0, self.height()-1);
-
-        Vec::from(self[(x, y)]).map(|chan| chan as f32 / 255.)
+        let ix = self.get_index_from_uv(uv, wrap);
+        Vec::from(self[(ix.x, ix.y)]).map(|chan| chan as f32 / 255.)
     }
 
     /// Index the matrix slice with uv coordinates. The access is clamped if the index is out of bounds.
@@ -269,6 +292,87 @@ where
         let ret = unsafe { std::mem::transmute_copy(&self) };
         std::mem::forget(self);
         ret
+    }
+}
+
+fn to_exclusive_bounds<B: RangeBounds<usize>>(bounds: B, min: usize, max: usize) -> Range<usize> {
+    let start = match bounds.start_bound() {
+        Bound::Included(&start) => start,
+        Bound::Excluded(&start) => start + 1,
+        Bound::Unbounded => min,
+    };
+    let end = match bounds.end_bound() {
+        Bound::Included(&end) => end + 1,
+        Bound::Excluded(&end) => end,
+        Bound::Unbounded => max,
+    };
+    start..end
+}
+
+// TODO: Remove this `RowMajor` restriction, and generalize
+impl<T, S, Width, Height> Texture<T, S, RowMajor<Width>, Width, Height>
+where
+    Width: Dim,
+    Height: Dim,
+    S: Storage<Elem = T>,
+{
+    pub fn slice<'b, R, C>(
+        &'b self,
+        cols: C,
+        rows: R,
+    ) -> Texture<T, BorrowedStorage<'b, T>, RowMajor>
+    where
+        R: RangeBounds<usize>,
+        C: RangeBounds<usize>,
+    {
+        let rows = to_exclusive_bounds(rows, 0, self.height());
+        let cols = to_exclusive_bounds(cols, 0, self.width());
+        if rows.end > self.height() || cols.end > self.width() {
+            panic!("out of bounds");
+        }
+        let offset = self.indexer.get_index(cols.start, rows.start);
+        Texture {
+            width: SomeNat::from_usize(cols.end - cols.start),
+            height: SomeNat::from_usize(rows.end - rows.start),
+            storage: BorrowedStorage {
+                ptr: unsafe { self.storage.ptr().add(offset) },
+                _marker: PhantomData,
+            },
+            indexer: RowMajor {
+                stride: SomeNat::from_usize(self.width()),
+            },
+            _marker: PhantomData,
+        }
+    }
+
+    pub fn slice_mut<'b, R, C>(
+        &'b mut self,
+        cols: C,
+        rows: R,
+    ) -> Texture<T, BorrowedMutStorage<'b, T>, RowMajor>
+    where
+        S: StorageMut,
+        R: RangeBounds<usize>,
+        C: RangeBounds<usize>,
+    {
+        let rows = to_exclusive_bounds(rows, 0, self.height());
+        let cols = to_exclusive_bounds(cols, 0, self.width());
+        if rows.end > self.height() || cols.end > self.width() {
+            panic!("out of bounds");
+        }
+        let offset = self.indexer.get_index(cols.start, rows.start);
+        Texture {
+            width: SomeNat::from_usize(cols.end - cols.start),
+            height: SomeNat::from_usize(rows.end - rows.start),
+            storage: BorrowedMutStorage {
+                ptr: unsafe { self.storage.ptr_mut().add(offset) },
+                _marker: PhantomData,
+            },
+            indexer: RowMajor {
+                stride: SomeNat::from_usize(self.width()),
+            },
+            _marker: PhantomData,
+        }
     }
 }
 

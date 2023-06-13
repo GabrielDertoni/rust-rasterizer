@@ -16,6 +16,7 @@ pub mod utils;
 pub mod vec;
 pub mod pipeline;
 pub mod simd_config;
+pub mod scene;
 
 // TODO: Move to separate crate
 pub mod frag_shaders;
@@ -27,7 +28,7 @@ pub type Pixel = [u8; 4];
 use std::simd::{LaneCount, Mask, Simd, SimdElement, SupportedLaneCount};
 
 use texture::BorrowedMutTexture;
-use vec::{Mat4x4, Vec, Vec2i, Vec2, Vec3, Vec4, Vec4xN};
+use vec::{Mat4x4, Vec, Vec2, Vec3, Vec4, Vec4xN};
 
 pub fn triangles_iter<'a, V>(
     vert: &'a [V],
@@ -60,6 +61,10 @@ pub struct VertBuf {
 }
 
 impl VertBuf {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
     pub fn with_capacity(cap: usize) -> Self {
         VertBuf {
             positions: std::vec::Vec::with_capacity(cap),
@@ -120,10 +125,47 @@ impl VertexBuf for VertBuf {
 impl FromIterator<Vertex> for VertBuf {
     fn from_iter<T: IntoIterator<Item = Vertex>>(iter: T) -> Self {
         let mut vert_buf = VertBuf::default();
-        for vertex in iter {
-            vert_buf.push(vertex)
-        }
+        vert_buf.extend(iter);
         vert_buf
+    }
+}
+
+impl std::iter::Extend<Vertex> for VertBuf {
+    fn extend<T: IntoIterator<Item = Vertex>>(&mut self, iter: T) {
+        for vertex in iter {
+            self.push(vertex)
+        }
+    }
+}
+
+impl std::iter::IntoIterator for VertBuf {
+    type Item = Vertex;
+    type IntoIter = VertBufIterator;
+
+    fn into_iter(self) -> VertBufIterator {
+        VertBufIterator {
+            positions: self.positions.into_iter(),
+            normals: self.normals.into_iter(),
+            uvs: self.uvs.into_iter(),
+        }
+    }
+}
+
+pub struct VertBufIterator {
+    positions: std::vec::IntoIter<Vec4>,
+    normals: std::vec::IntoIter<Vec3>,
+    uvs: std::vec::IntoIter<Vec2>,
+}
+
+impl Iterator for VertBufIterator {
+    type Item = Vertex;
+
+    fn next(&mut self) -> Option<Vertex> {
+        Some(Vertex {
+            position: self.positions.next()?,
+            normal: self.normals.next()?,
+            uv: self.uvs.next()?,
+        })
     }
 }
 
@@ -222,11 +264,12 @@ pub trait FragmentShader<A: Attributes> {
     }
 }
 
-pub trait VertexShader<Vertex: IntoSimd> {
+pub trait VertexShader<Vertex/*: IntoSimd*/> {
     type Output: Attributes;
 
     fn exec(&self, vertex: Vertex) -> Self::Output;
 
+    /*
     fn exec_simd<const LANES: usize>(
         &self,
         vertex: Vertex::Simd<LANES>,
@@ -266,6 +309,7 @@ pub trait VertexShader<Vertex: IntoSimd> {
             vertex,
         }))
     }
+    */
 }
 
 #[macro_export]
@@ -467,10 +511,11 @@ impl_attributes_tuple!(
 */
 
 pub trait VertexBuf {
-    type Vertex: IntoSimd;
+    type Vertex/*: IntoSimd*/;
 
     fn index(&self, index: usize) -> Self::Vertex;
 
+    /*
     fn gather<const LANES: usize>(
         &self,
         index: Simd<usize, LANES>,
@@ -501,11 +546,26 @@ pub trait VertexBuf {
 
         StructureOfArray::from_array(vec::detail::array_from_fn(ConstFn(self, index)))
     }
+    */
 
     fn len(&self) -> usize;
 }
 
-impl<V: IntoSimd + Copy> VertexBuf for [V] {
+impl<'a, B: VertexBuf + ?Sized> VertexBuf for &'a B {
+    type Vertex = B::Vertex;
+
+    #[inline(always)]
+    fn index(&self, index: usize) -> Self::Vertex {
+        (*self).index(index)
+    }
+
+    #[inline(always)]
+    fn len(&self) -> usize {
+        (*self).len()
+    }
+}
+
+impl<V:/* IntoSimd +*/ Copy> VertexBuf for [V] {
     type Vertex = V;
 
     #[inline(always)]

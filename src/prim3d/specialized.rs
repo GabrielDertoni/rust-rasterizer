@@ -63,6 +63,100 @@ pub fn draw_triangles_depth_specialized(
     }
 }
 
+/// Fastest function to draw the depth buffer for a single 3D triangle.
+#[inline(always)]
+fn draw_triangle_depth(
+    p0_screen: Vec2i,
+    p1_screen: Vec2i,
+    p2_screen: Vec2i,
+    z0: f32,
+    z1: f32,
+    z2: f32,
+    depth_buf: MatrixSliceMut<f32>,
+    aabb: BBox<i32>,
+    bias: f32,
+) {
+    let mut min = p0_screen.min(p1_screen).min(p2_screen);
+    // Only works because `STEP_X` is a power of 2.
+    min.x &= !(STEP_X - 1) as i32;
+    min.x = min.x.max(aabb.x);
+    min.y &= !(STEP_Y - 1) as i32;
+    min.y = min.y.max(aabb.y);
+    let max = p0_screen.max(p1_screen).max(p2_screen).min(Vec2i::from([
+        aabb.x + aabb.width - STEP_X,
+        aabb.y + aabb.height - STEP_Y,
+    ]));
+
+    let is_visible = is_triangle_visible(p0_screen, p1_screen, p2_screen, z0, z1, z2, aabb);
+
+    // 2 times the area of the triangle
+    let tri_area = orient_2d(p0_screen, p1_screen, p2_screen);
+
+    if tri_area <= 0 || !is_visible || min.x == max.x || min.y == max.y {
+        return;
+    }
+
+    let (w0_inc, mut w0_row) = orient_2d_step(p1_screen, p2_screen, min);
+    let (w1_inc, mut w1_row) = orient_2d_step(p2_screen, p0_screen, min);
+    let (w2_inc, mut w2_row) = orient_2d_step(p0_screen, p1_screen, min);
+
+    let inv_area = 1. / tri_area as f32;
+    let (z0, z1, z2) = (
+        Simd::splat(z0 * inv_area),
+        Simd::splat(z1 * inv_area),
+        Simd::splat(z2 * inv_area),
+    );
+    let bias = Simd::splat(bias);
+
+    let stride = depth_buf.stride;
+    let depth_buf = depth_buf.as_slice_mut().as_mut_ptr();
+
+    let mut z_row = w0_row.cast() * z0 + w1_row.cast() * z1 + w2_row.cast() * z2;
+    let z_inc = Vec::from([
+        w0_inc.x.cast() * z0 + w1_inc.x.cast() * z1 + w2_inc.x.cast() * z2,
+        w0_inc.y.cast() * z0 + w1_inc.y.cast() * z1 + w2_inc.y.cast() * z2,
+    ]);
+
+    let mut idx_row = min.y as usize * stride + min.x as usize;
+
+    let mut y = min.y;
+    while y < max.y {
+        let mut w0 = w0_row;
+        let mut w1 = w1_row;
+        let mut w2 = w2_row;
+        let mut x = min.x;
+        let mut z = z_row;
+        let mut idx = idx_row;
+        while x < max.x {
+            let mask = (w0 | w1 | w2).simd_ge(Simd::splat(0));
+
+            let prev_depth = unsafe { *depth_buf.add(idx).cast() };
+            let mask = mask & z.simd_lt(prev_depth);
+
+            let new_depth = mask.select(z + bias, prev_depth);
+            unsafe {
+                let ptr = depth_buf.add(idx).cast();
+                *ptr = new_depth;
+            }
+
+            w0 += w0_inc.x;
+            w1 += w1_inc.x;
+            w2 += w2_inc.x;
+            z += z_inc.x;
+
+            x += STEP_X;
+            idx += LANES;
+        }
+        w0_row += w0_inc.y;
+        w1_row += w1_inc.y;
+        w2_row += w2_inc.y;
+        z_row += z_inc.y;
+
+        y += STEP_Y;
+        idx_row += STEP_Y as usize * stride;
+    }
+}
+
 #[inline(always)]
 fn draw_triangle_depth_alpha(
     p0_screen: Vec2i,

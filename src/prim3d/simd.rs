@@ -1,9 +1,8 @@
-use std::simd::{Mask, Simd, SimdFloat, SimdPartialOrd};
+use std::simd::{Simd, SimdPartialOrd};
 
 use crate::{
-    Attributes, FragmentShader, IntoSimd, ScreenPos, StructureOfArray, VertexBuf, VertexShader,
-    buf::{MatrixSlice, MatrixSliceMut, PixelBuf},
-    vec::{Mat4x4, Vec, Vec2, Vec2i, Vec3, Vec4},
+    Attributes, FragmentShader, IntoSimd, ScreenPos,
+    vec::{Vec, Vec2i, Vec3},
     pipeline::Metrics,
     texture::{BorrowedMutTexture, Dim},
     simd_config::LANES,
@@ -87,7 +86,8 @@ fn draw_triangle<VertOut, S>(
         u.x * v.y - u.y * v.x
     };
 
-    let inside_frustum = is_inside_frustum(p0_ndc.xyz(), p1_ndc.xyz(), p2_ndc.xyz());
+    // let inside_frustum = is_inside_frustum(p0_ndc.xyz(), p1_ndc.xyz(), p2_ndc.xyz());
+    let inside_frustum = (p0_ndc.z >= -1. || p1_ndc.z >= -1. || p2_ndc.z >= -1.) && (p0_ndc.z <= 1. && p1_ndc.z <= 1. && p2_ndc.z <= 1.);
 
     if tri_area <= 0 || nz >= 0 || !inside_frustum || min.x == max.x || min.y == max.y {
         if !inside_frustum {
@@ -121,7 +121,10 @@ fn draw_triangle<VertOut, S>(
                 w_persp /= w_persp.x + w_persp.y + w_persp.z;
 
                 let z = w.dot(Vec::from([p0_ndc.z, p1_ndc.z, p2_ndc.z]).splat());
-                let prev_depth = unsafe { *depth_buf.as_ptr().add(idx).cast::<Simd<f32, LANES>>() };
+                let prev_depth = unsafe {
+                    let ptr = &mut depth_buf[idx] as *const f32;
+                    *ptr.cast::<Simd<f32, LANES>>()
+                };
                 let mut mask = mask & z.simd_lt(prev_depth);
 
                 if mask.any() {
@@ -154,74 +157,6 @@ fn draw_triangle<VertOut, S>(
     }
     metrics.sum_areas += tri_area as i64;
     metrics.triangles_drawn += 1;
-}
-
-/// Basically stores preallocated memory that can be reused between draw calls.
-pub struct RenderContext {
-    vertex_attrib: bumpalo::Bump,
-    tiles: bumpalo::Bump,
-}
-
-impl RenderContext {
-    pub fn alloc(cap: usize) -> Self {
-        RenderContext {
-            vertex_attrib: bumpalo::Bump::with_capacity(cap),
-            tiles: bumpalo::Bump::new(),
-        }
-    }
-}
-
-fn vertex_processing<'a, B, V>(
-    vert: &B,
-    vert_shader: &V,
-    ctx: &'a mut RenderContext,
-) -> bumpalo::collections::Vec<'a, V::Output>
-where
-    B: VertexBuf + ?Sized,
-    V: VertexShader<B::Vertex>,
-{
-    ctx.vertex_attrib.reset();
-    let mut vertex_attrib = bumpalo::collections::Vec::new_in(&ctx.vertex_attrib);
-    /*
-    vertex_attrib.extend((0..vert.len()).map(|i| {
-        let mut attrib = vert_shader.exec(vert.index(i));
-        let pos = attrib.position_mut();
-        let inv_w = 1. / pos.w;
-        *pos.xyz_mut() *= inv_w;
-        pos.w = inv_w;
-        attrib
-    }));
-    */
-    let last_multiple = (vert.len() as isize).next_multiple_of(-(LANES as isize));
-    if last_multiple > 0 {
-        vertex_attrib.extend(
-            (0..last_multiple as usize)
-                .step_by(LANES)
-                .map(|i| {
-                    let i = Simd::splat(i) + Simd::from([0, 1, 2, 3]);
-                    let attrib = vert_shader.exec_simd(vert.gather(i));
-                    crate::unroll_array!(LANE: usize = 0, 1, 2, 3 => {
-                        let mut attrib = attrib.index(LANE);
-                        let pos = attrib.position_mut();
-                        let inv_w = 1. / pos.w;
-                        *pos.xyz_mut() *= inv_w;
-                        pos.w = inv_w;
-                        attrib
-                    })
-                })
-                .flatten(),
-        );
-    }
-    let rest = vert.len() - last_multiple.max(0) as usize;
-    vertex_attrib.extend((rest..vert.len() as usize).map(|i| {
-        let mut attrib = vert_shader.exec(vert.index(i));
-        let pos = attrib.position_mut();
-        let inv_w = 1. / pos.w;
-        *pos.xyz_mut() *= inv_w;
-        pos.w = inv_w;
-        attrib
-    }));
-    vertex_attrib
 }
 
 /*
@@ -381,41 +316,6 @@ pub fn draw_triangles_depth<B, V>(
 }
 */
 
-pub trait Culling {
-    const CULL_BACK_FACE: bool;
-    const CULL_FRONT_FACE: bool;
-
-    #[inline(always)]
-    fn sort_vertices<T: Attributes>(v0: &mut T, v1: &mut T, v2: &mut T) {
-        match (Self::CULL_FRONT_FACE, Self::CULL_BACK_FACE) {
-            (true, true) => (), // Order won't matter, we'll just cull everything
-            (false, true) => std::mem::swap(v0, v2), // Always swap
-            (true, false) => (), // Never swap
-            // Need to look at the signed area in order to swap only if necessary
-            (false, false)
-                if orient_2d(v0.position().xy(), v1.position().xy(), v2.position().xy()) < 0.0 =>
-            {
-                std::mem::swap(v0, v2)
-            }
-            (false, false) => (), // Already correct
-        }
-    }
-}
-
-pub struct CullBackFaces;
-
-impl Culling for CullBackFaces {
-    const CULL_BACK_FACE: bool = true;
-    const CULL_FRONT_FACE: bool = false;
-}
-
-pub struct CullFrontFaces;
-
-impl Culling for CullFrontFaces {
-    const CULL_BACK_FACE: bool = false;
-    const CULL_FRONT_FACE: bool = true;
-}
-
 #[inline(always)]
 fn is_triangle_visible(
     p0_screen: Vec2i,
@@ -447,99 +347,6 @@ fn is_triangle_visible(
     inside_frustum && nz < 0
 }
 
-/// Fastest function to draw the depth buffer for a single 3D triangle.
-#[inline(always)]
-fn draw_triangle_depth(
-    p0_screen: Vec2i,
-    p1_screen: Vec2i,
-    p2_screen: Vec2i,
-    z0: f32,
-    z1: f32,
-    z2: f32,
-    depth_buf: MatrixSliceMut<f32>,
-    aabb: BBox<i32>,
-    bias: f32,
-) {
-    let mut min = p0_screen.min(p1_screen).min(p2_screen);
-    // Only works because `STEP_X` is a power of 2.
-    min.x &= !(STEP_X - 1) as i32;
-    min.x = min.x.max(aabb.x);
-    min.y &= !(STEP_Y - 1) as i32;
-    min.y = min.y.max(aabb.y);
-    let max = p0_screen.max(p1_screen).max(p2_screen).min(Vec2i::from([
-        aabb.x + aabb.width - STEP_X,
-        aabb.y + aabb.height - STEP_Y,
-    ]));
-
-    let is_visible = is_triangle_visible(p0_screen, p1_screen, p2_screen, z0, z1, z2, aabb);
-
-    // 2 times the area of the triangle
-    let tri_area = orient_2d(p0_screen, p1_screen, p2_screen);
-
-    if tri_area <= 0 || !is_visible || min.x == max.x || min.y == max.y {
-        return;
-    }
-
-    let (w0_inc, mut w0_row) = orient_2d_step(p1_screen, p2_screen, min);
-    let (w1_inc, mut w1_row) = orient_2d_step(p2_screen, p0_screen, min);
-    let (w2_inc, mut w2_row) = orient_2d_step(p0_screen, p1_screen, min);
-
-    let inv_area = 1. / tri_area as f32;
-    let (z0, z1, z2) = (
-        Simd::splat(z0 * inv_area),
-        Simd::splat(z1 * inv_area),
-        Simd::splat(z2 * inv_area),
-    );
-    let bias = Simd::splat(bias);
-
-    let stride = depth_buf.stride;
-    let depth_buf = depth_buf.as_slice_mut().as_mut_ptr();
-
-    let mut z_row = w0_row.cast() * z0 + w1_row.cast() * z1 + w2_row.cast() * z2;
-    let z_inc = Vec::from([
-        w0_inc.x.cast() * z0 + w1_inc.x.cast() * z1 + w2_inc.x.cast() * z2,
-        w0_inc.y.cast() * z0 + w1_inc.y.cast() * z1 + w2_inc.y.cast() * z2,
-    ]);
-
-    let mut idx_row = min.y as usize * stride + min.x as usize;
-
-    let mut y = min.y;
-    while y < max.y {
-        let mut w0 = w0_row;
-        let mut w1 = w1_row;
-        let mut w2 = w2_row;
-        let mut x = min.x;
-        let mut z = z_row;
-        let mut idx = idx_row;
-        while x < max.x {
-            let mask = (w0 | w1 | w2).simd_ge(Simd::splat(0));
-
-            let prev_depth = unsafe { *depth_buf.add(idx).cast() };
-            let mask = mask & z.simd_lt(prev_depth);
-
-            let new_depth = mask.select(z + bias, prev_depth);
-            unsafe {
-                let ptr = depth_buf.add(idx).cast();
-                *ptr = new_depth;
-            }
-
-            w0 += w0_inc.x;
-            w1 += w1_inc.x;
-            w2 += w2_inc.x;
-            z += z_inc.x;
-
-            x += STEP_X;
-            idx += LANES;
-        }
-        w0_row += w0_inc.y;
-        w1_row += w1_inc.y;
-        w2_row += w2_inc.y;
-        z_row += z_inc.y;
-
-        y += STEP_Y;
-        idx_row += STEP_Y as usize * stride;
-    }
-}
 
 /*
 fn triangle_bbox(v0: Vec2i, v1: Vec2i, v2: Vec2i) -> BBox<i32> {

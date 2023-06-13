@@ -100,7 +100,6 @@ pub(super) fn is_inside_frustum(p0_ndc: Vec3, p1_ndc: Vec3, p2_ndc: Vec3) -> boo
 
 pub(crate) fn process_vertex<Vert, V>(v: Vert, vert_shader: &V) -> V::Output
 where
-    Vert: IntoSimd,
     V: VertexShader<Vert>,
 {
     let mut out = vert_shader.exec(v);

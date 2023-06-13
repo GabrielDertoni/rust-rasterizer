@@ -6,66 +6,27 @@ pub(crate) mod simd;
 use common::*;
 
 use crate::{
-    Attributes, VertexBuf, VertexShader, FragmentShader,
+    Attributes, FragmentShader,
     vec::{Vec, Vec2i, Vec3, Vec4},
     pipeline::Metrics,
     texture::BorrowedMutTexture,
 };
 
-/*
-pub fn draw_triangles<B, V, S>(
-    vert: &B,
-    tris: &[[usize; 3]],
-    vert_shader: &V,
-    frag_shader: &S,
-    mut pixels: BorrowedMutTexture<[u8; 4]>,
-    mut depth_buf: BorrowedMutTexture<f32>,
-    metrics: &mut Metrics,
-)
-where
-    B: VertexBuf + ?Sized,
-    V: VertexShader<B::Vertex>,
-    V::Output: Copy,
-    S: Fn(V::Output) -> Vec4,
-{
-    assert_eq!(pixels.width(), depth_buf.width());
-    assert_eq!(pixels.height(), depth_buf.height());
-
-    let bbox = BBox {
-        x: 0,
-        y: 0,
-        width: pixels.width() as i32,
-        height: pixels.height() as i32,
-    };
-
-    for &[v0, v1, v2] in tris {
-        let (v2, v1, v0) = (v0, v1, v2);
-
-        let attrib0 = process_vertex(vert.index(v0), vert_shader);
-        let attrib1 = process_vertex(vert.index(v1), vert_shader);
-        let attrib2 = process_vertex(vert.index(v2), vert_shader);
-
-        draw_triangle(
-            attrib0,
-            attrib1,
-            attrib2,
-            frag_shader,
-            pixels.borrow_mut(),
-            depth_buf.borrow_mut(),
-            bbox,
-            &mut *metrics,
-        );
-    }
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum CullingMode {
+    FrontFace,
+    BackFace,
+    Disabled,
 }
-*/
 
 pub fn draw_triangles<Attr, S>(
     attributes: &[Attr],
     tris: &[[usize; 3]],
     frag_shader: &S,
     mut pixels: BorrowedMutTexture<[u8; 4]>,
-    mut depth_buf: BorrowedMutTexture<f32>,
+    mut depth_buf: Option<BorrowedMutTexture<f32>>,
     metrics: &mut Metrics,
+    culling: CullingMode,
 )
 where
     Attr: Attributes + Copy,
@@ -79,7 +40,18 @@ where
     };
 
     for &[v0, v1, v2] in tris {
-        let (v2, v1, v0) = (v0, v1, v2);
+        let (v0, v1, v2) = match culling {
+            CullingMode::FrontFace => (v0, v1, v2),
+            CullingMode::BackFace => (v2, v1, v0),
+            CullingMode::Disabled => {
+                let sign = orient_2d(attributes[v0].position().xy(), attributes[v1].position().xy(), attributes[v2].position().xy());
+                if sign > 0.0 {
+                    (v2, v1, v0)
+                } else {
+                    (v0, v1, v2)
+                }
+            }
+        };
 
         draw_triangle(
             attributes[v0],
@@ -87,7 +59,7 @@ where
             attributes[v2],
             frag_shader,
             pixels.borrow_mut(),
-            depth_buf.borrow_mut(),
+            depth_buf.as_mut().map(|depth_buf| depth_buf.borrow_mut()),
             bbox,
             &mut *metrics,
         );
@@ -104,7 +76,7 @@ fn draw_triangle<Attr, F>(
     // `pixels` must be coalesced into bundles of `LANES`
     // TODO: Maybe these could be `MatrixSliceMut<Simd<u32, LANES>>`, since that's actually how they're used
     mut pixels: BorrowedMutTexture<[u8; 4]>,
-    mut depth_buf: BorrowedMutTexture<f32>,
+    mut depth_buf: Option<BorrowedMutTexture<f32>>,
     aabb: BBox<i32>,
     metrics: &mut Metrics,
 ) where
@@ -170,7 +142,7 @@ fn draw_triangle<Attr, F>(
                 w_persp /= w_persp.x + w_persp.y + w_persp.z;
 
                 let z = w.dot(Vec::from([p0_ndc.z, p1_ndc.z, p2_ndc.z]));
-                let prev_depth = depth_buf[(x, y)];
+                let prev_depth = depth_buf.as_ref().map(|depth_buf| depth_buf[(x, y)]).unwrap_or(1.);
 
                 if z < prev_depth {
                     let interp = Attributes::interpolate_basic(&v0, &v1, &v2, w_persp);
@@ -181,7 +153,9 @@ fn draw_triangle<Attr, F>(
                         let blended = prev_color.xyz() * (1. - alpha) + color.xyz() * alpha;
                         let final_color = Vec4::from([blended.x, blended.y, blended.z, 1.]).map(|chan| (chan.clamp(0., 1.) * 255.) as u8);
                         pixels[(x, y)] = final_color.to_array();
-                        depth_buf[(x, y)] = z;
+                        if let Some(depth_buf) = &mut depth_buf {
+                            depth_buf[(x, y)] = z;
+                        }
                     }
                 }
             }

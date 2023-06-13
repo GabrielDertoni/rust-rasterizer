@@ -2,6 +2,7 @@ use std::simd::Simd;
 use std::ops::Range;
 
 use crate::{Attributes, VertexShader, FragmentShader, VertexBuf, Vertex, VertBuf, texture::BorrowedMutTexture, simd_config::LANES};
+use crate::prim3d::CullingMode;
 
 macro_rules! static_assert_eq {
     ($lhs:expr, $rhs:expr) => {{
@@ -9,17 +10,33 @@ macro_rules! static_assert_eq {
     }};
 }
 
-pub struct Pipeline<'a> {
-    vert_buf: &'a VertBuf,
+pub struct Pipeline<'a, B = &'a VertBuf> {
+    vert_buf: B,
     index_buf: &'a [[usize; 3]],
     color_buf: Option<BorrowedMutTexture<'a, [u8; 4]>>,
     depth_buf: Option<BorrowedMutTexture<'a, f32>>,
     use_simd: bool,
     metrics: Metrics,
+    culling_mode: CullingMode,
 }
 
-impl<'a> Pipeline<'a> {
-    pub fn new(vert_buf: &'a VertBuf, index_buf: &'a [[usize; 3]]) -> Self {
+impl<'a, B> Pipeline<'a, B>
+where
+    B: VertexBuf,
+{
+    pub fn new(vert_buf: B, index_buf: &'a [[usize; 3]]) -> Self {
+        Pipeline {
+            vert_buf,
+            index_buf,
+            color_buf: None,
+            depth_buf: None,
+            use_simd: true,
+            metrics: Metrics::new(),
+            culling_mode: CullingMode::BackFace,
+        }
+    }
+
+    pub fn new_basic(vert_buf: B, index_buf: &'a [[usize; 3]]) -> Self {
         Pipeline {
             vert_buf,
             index_buf,
@@ -27,6 +44,7 @@ impl<'a> Pipeline<'a> {
             depth_buf: None,
             use_simd: false,
             metrics: Metrics::new(),
+            culling_mode: CullingMode::BackFace,
         }
     }
 
@@ -97,7 +115,11 @@ impl<'a> Pipeline<'a> {
         self.depth_buf.take()
     }
 
-    pub fn process_vertices<'b: 'a, V: VertexShader<Vertex>>(&'b mut self, vert_shader: &V) -> ProcessedVertices<'b, V::Output> {
+    pub fn set_culling_mode(&mut self, culling_mode: CullingMode) {
+        self.culling_mode = culling_mode;
+    }
+
+    pub fn process_vertices<'b: 'a, V: VertexShader<B::Vertex>>(&'b mut self, vert_shader: &V) -> ProcessedVertices<'b, V::Output, B> {
         use crate::prim3d::common::process_vertex;
 
         let attributes = (0..self.vert_buf.len())
@@ -115,19 +137,22 @@ impl<'a> Pipeline<'a> {
     }
 }
 
-pub struct ProcessedVertices<'a, Attr> {
-    pipeline: &'a mut Pipeline<'a>,
+pub struct ProcessedVertices<'a, Attr, B = &'a VertBuf> {
+    pipeline: &'a mut Pipeline<'a, B>,
     attributes: Vec<Attr>,
 }
 
-impl<'a, Attr: Attributes + Copy> ProcessedVertices<'a, Attr> {
+impl<'a, Attr: Attributes + Copy, B> ProcessedVertices<'a, Attr, B>
+where
+    B: VertexBuf,
+{
     pub fn draw<F: FragmentShader<Attr>>(&mut self, range: Range<usize>, frag_shader: &F) {
 
-        let mut color_buf = self.pipeline.color_buf.as_mut().expect("no color buffer").borrow_mut();
-        let mut depth_buf = self.pipeline.depth_buf.as_mut().expect("no depth buffer").borrow_mut();
-
+        let color_buf = self.pipeline.color_buf.as_mut().expect("no color buffer").borrow_mut();
+        
         if self.pipeline.use_simd {
             use crate::prim3d::simd::draw_triangles;
+            let depth_buf = self.pipeline.depth_buf.as_mut().expect("no depth buffer").borrow_mut();
 
             let color_buf = unsafe { color_buf.cast::<u32>() };
             draw_triangles(
@@ -140,6 +165,7 @@ impl<'a, Attr: Attributes + Copy> ProcessedVertices<'a, Attr> {
             );
         } else {
             use crate::prim3d::draw_triangles;
+            let depth_buf = self.pipeline.depth_buf.as_mut().map(|depth_buf| depth_buf.borrow_mut());
 
             draw_triangles(
                 &self.attributes,
@@ -148,6 +174,7 @@ impl<'a, Attr: Attributes + Copy> ProcessedVertices<'a, Attr> {
                 color_buf,
                 depth_buf,
                 &mut self.pipeline.metrics,
+                self.pipeline.culling_mode,
             );
         }
     }
