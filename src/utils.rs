@@ -1,3 +1,5 @@
+use std::time::{Duration, Instant};
+
 use crate::vec::{Mat3x3, Mat4x4, Vec3};
 
 #[macro_export]
@@ -17,6 +19,78 @@ macro_rules! unroll {
             let $v = $values;
             $block;
         )*
+    }
+}
+
+/// FPS counter that averages N samples in order to calculate framerate.
+#[derive(Clone, Default)]
+pub struct FpsCounter {
+    measured_times: Vec<std::time::Duration>,
+    max_samples: usize,
+}
+
+impl FpsCounter {
+    pub fn new() -> Self {
+        let max_samples = 60;
+        FpsCounter {
+            measured_times: Vec::with_capacity(max_samples),
+            max_samples,
+        }
+    }
+
+    pub fn measure<T>(&mut self, f: impl FnOnce() -> T) -> T {
+        let start = Instant::now();
+        let ret = f();
+        let time = start.elapsed();
+        self.record_measurement(time);
+        ret
+    }
+
+    pub fn record_measurement(&mut self, measurement: Duration) {
+        if self.measured_times.len() >= self.max_samples {
+            self.measured_times.rotate_left(1);
+            *self.measured_times.last_mut().unwrap() = measurement;
+        } else {
+            self.measured_times.push(measurement);
+        }
+    }
+
+    pub fn measure_scoped<'a>(&'a mut self) -> MeasureScopeGuard<'a> {
+        MeasureScopeGuard {
+            start: Instant::now(),
+            counter: self,
+        }
+    }
+
+    pub fn mean_time(&self) -> Duration {
+        self.measured_times.iter().sum::<Duration>() / self.measured_times.len() as u32
+    }
+
+    pub fn mean_fps(&self) -> f32 {
+        1. / self.mean_time().as_secs_f32()
+    }
+
+    pub fn worst_mean_time(&mut self, fraction: f32) -> Duration {
+        assert!(fraction > 0. && fraction <= 1., "fraction must be in range [0, 1]");
+        self.measured_times.sort_unstable();
+        let len = self.measured_times.len() / (1. / fraction) as usize;
+        let len = len.clamp(1, self.measured_times.len());
+        self.measured_times[..len].iter().sum::<Duration>() / len as u32
+    }
+
+    pub fn worst_fps(&mut self, fraction: f32) -> f32 {
+        1. / self.worst_mean_time(fraction).as_secs_f32()
+    }
+}
+
+pub struct MeasureScopeGuard<'a> {
+    start: Instant,
+    counter: &'a mut FpsCounter,
+}
+
+impl<'a> Drop for MeasureScopeGuard<'a> {
+    fn drop(&mut self) {
+        self.counter.record_measurement(self.start.elapsed());
     }
 }
 

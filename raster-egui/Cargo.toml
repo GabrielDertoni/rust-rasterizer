@@ -1,0 +1,15 @@
+[package]
+name = "raster-egui"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+rasterization.path = ".."
+egui = "0.22"
+epaint = "0.22"
+pixels = "0.12"
+# TODO: remove this
+image = "0.24.6"
+egui-winit = "0.22.0"

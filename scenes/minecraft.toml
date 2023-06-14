@@ -1,0 +1,23 @@
+[[models]]
+path = "../models/lost_empire/lost_empire.obj"
+
+[camera]
+kind = "fpv"
+up = "z"
+position = [-7.4, 30.8, 12.7]
+rotation = [87.4295, 0.0, -180.382]
+fovy = 39.6
+sensitivity = 0.05
+speed = 5.0
+
+[rendering]
+width = 1280
+height = 720
+near = 0.1
+far = 100
+
+[rasterizer]
+implementation = "bbox-simd"
+
+[config]
+enable-shadows = false

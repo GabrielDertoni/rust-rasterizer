@@ -52,7 +52,9 @@ pub fn into_simd_derive(input: proc_macro::TokenStream) -> proc_macro::TokenStre
                         std::simd::LaneCount<LANES>: std::simd::SupportedLaneCount,
                         #(#constraints,)*
                     {
-                        #(#field_decls,)*
+                        #(
+                            #field_decls,
+                        )*
                     }
                 },
                 quote! {
@@ -166,7 +168,7 @@ pub fn attributes_derive(input: proc_macro::TokenStream) -> proc_macro::TokenStr
 
     let ident = input.ident;
 
-    let (position_field, interpolate) = match structure.fields {
+    let (position_field, interpolate, interpolate_basic) = match structure.fields {
         Fields::Named(fields) => {
             let mut it = fields.named.iter();
             let find_closure = |field: &&Field| -> bool {
@@ -192,6 +194,7 @@ pub fn attributes_derive(input: proc_macro::TokenStream) -> proc_macro::TokenStr
             }
 
             let field_names = fields.named.iter().map(|field| &field.ident);
+            let field_names2 = field_names.clone();
 
             let interpolate = quote! {
                 Self::Simd {
@@ -199,7 +202,13 @@ pub fn attributes_derive(input: proc_macro::TokenStream) -> proc_macro::TokenStr
                 }
             };
 
-            (position_field.ident.clone(), interpolate)
+            let interpolate_basic = quote! {
+                Self {
+                    #(#field_names2: w.x * p0.#field_names2 + w.y * p1.#field_names2 + w.z * p2.#field_names2),*
+                }
+            };
+
+            (position_field.ident.clone(), interpolate, interpolate_basic)
         }
         Fields::Unnamed(_) => todo!(),
         Fields::Unit => todo!(),
@@ -218,6 +227,10 @@ pub fn attributes_derive(input: proc_macro::TokenStream) -> proc_macro::TokenStr
                 LaneCount<LANES>: SupportedLaneCount,
             {
                 #interpolate
+            }
+            
+            fn interpolate_basic(p0: &Self, p1: &Self, p2: &Self, w: Vec<f32, 3>) -> Self {
+                #interpolate_basic
             }
 
             #[inline(always)]
