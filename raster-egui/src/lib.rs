@@ -36,10 +36,10 @@ pub fn run<A: App>(screen_name: &str, options: Options, mut app: A) -> ! {
         .build(&event_loop)
         .unwrap();
 
-    let wsize = window.inner_size();
+    let mut wsize = window.inner_size();
     let mut pixels = {
         let surface_texture = SurfaceTexture::new(wsize.width, wsize.height, &window);
-        Pixels::new(width, height, surface_texture).unwrap()
+        Pixels::new(wsize.width, wsize.height, surface_texture).unwrap()
     };
     let mut ctx = Context::new(egui::Context::default(), &window);
     event_loop.run(move |event, _, control_flow| {
@@ -50,6 +50,14 @@ pub fn run<A: App>(screen_name: &str, options: Options, mut app: A) -> ! {
                 event: WindowEvent::CloseRequested,
                 ..
             } => control_flow.set_exit(),
+            Event::WindowEvent {
+                event: WindowEvent::Resized(newsize),
+                ..
+            } => {
+                wsize = newsize;
+                pixels.resize_buffer(wsize.width, wsize.height).unwrap();
+                pixels.resize_surface(wsize.width, wsize.height).unwrap();
+            }
             Event::WindowEvent { event, .. } => {
                 let response = ctx.io_state.on_event(&ctx.egui_ctx, &event);
                 if response.repaint {

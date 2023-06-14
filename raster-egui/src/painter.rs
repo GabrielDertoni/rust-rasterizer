@@ -5,32 +5,29 @@ use epaint::{image::ImageData, Mesh, Primitive};
 
 use rasterization::texture::{BorrowedMutTexture, OwnedTexture};
 
-pub enum TextureKind {
-    Color(OwnedTexture<[u8; 4]>),
-    Font(OwnedTexture<f32>),
-}
-
-impl From<ImageData> for TextureKind {
-    fn from(image: ImageData) -> Self {
-        match image {
-            ImageData::Color(im) => TextureKind::Color(color_image_to_texture(im)),
-            ImageData::Font(im) => TextureKind::Font(font_image_to_texture(im)),
-        }
-    }
-}
-
 fn color_image_to_texture(image: epaint::image::ColorImage) -> OwnedTexture<[u8; 4]> {
     let tex = OwnedTexture::from_vec(image.width(), image.height(), image.pixels);
     // SAFETY: `Color32` is just a 32 bit color value with RGBA bytes, see https://docs.rs/epaint/0.22.0/epaint/struct.Color32.html.
     unsafe { tex.cast::<[u8; 4]>() }
 }
 
-fn font_image_to_texture(image: epaint::image::FontImage) -> OwnedTexture<f32> {
-    OwnedTexture::from_vec(image.width(), image.height(), image.pixels)
+fn font_image_to_texture(image: epaint::image::FontImage) -> OwnedTexture<[u8; 4]> {
+    let vec = image.srgba_pixels(None)
+        .map(|val| {
+            let [r, g, b, a] = egui::Rgba::from(val).to_rgba_unmultiplied();
+            [
+                (r * 255.) as u8,
+                (g * 255.) as u8,
+                (b * 255.) as u8,
+                (a * 255.) as u8,
+            ]
+        })
+        .collect();
+    OwnedTexture::from_vec(image.width(), image.height(), vec)
 }
 
 pub struct Painter {
-    textures: HashMap<TextureId, TextureKind>,
+    textures: HashMap<TextureId, OwnedTexture<[u8; 4]>>,
 }
 
 impl Painter {
@@ -79,62 +76,31 @@ impl Painter {
             width: width as f32 / egui_ctx.pixels_per_point(),
             height: height as f32 / egui_ctx.pixels_per_point(),
         });
-        match tex {
-            TextureKind::Color(tex) => {
-                pipeline.draw(
-                    0..indices.len(),
-                    &shaders::ColoredFrag {
-                        texture: tex.borrow(),
-                    },
-                );
-            }
-            TextureKind::Font(tex) => {
-                pipeline.draw(
-                    0..indices.len(),
-                    &shaders::FontFrag {
-                        texture: tex.borrow(),
-                    },
-                );
-            }
-        }
+        pipeline.draw(
+            0..indices.len(),
+            &shaders::ColoredFrag {
+                texture: tex.borrow(),
+            },
+        );
         pipeline.finalize();
     }
 
     fn update_textures(&mut self, deltas: TexturesDelta) {
         for (id, delta) in deltas.set {
             if self.textures.contains_key(&id) {
-                match (self.textures.get_mut(&id).unwrap(), delta.image) {
-                    (TextureKind::Color(curr), ImageData::Color(update)) => {
-                        let update = color_image_to_texture(update);
-                        if let Some(pos) = delta.pos {
-                            curr.slice_mut(
-                                pos[0]..pos[0] + update.width(),
-                                pos[1]..pos[1] + update.height(),
-                            )
-                            .copy_from(&update);
-                        } else {
-                            *curr = update;
-                        }
-                    }
-                    (TextureKind::Font(curr), ImageData::Font(update)) => {
-                        let update = font_image_to_texture(update);
-                        if let Some(pos) = delta.pos {
-                            curr.slice_mut(
-                                pos[0]..pos[0] + update.width(),
-                                pos[1]..pos[1] + update.height(),
-                            )
-                            .copy_from(&update);
-                        } else {
-                            *curr = update;
-                        }
-                    }
-                    (curr, update) => {
-                        assert!(
-                            delta.pos.is_none(),
-                            "expected `pos` to be none since texture kinds are different"
-                        );
-                        *curr = update.into();
-                    }
+                let update = match delta.image {
+                    ImageData::Color(image) => color_image_to_texture(image),
+                    ImageData::Font(image) => font_image_to_texture(image),
+                };
+                let curr = self.textures.get_mut(&id).unwrap();
+                if let Some(pos) = delta.pos {
+                    curr.slice_mut(
+                        pos[0]..pos[0] + update.width(),
+                        pos[1]..pos[1] + update.height(),
+                    )
+                    .copy_from(&update);
+                } else {
+                    *curr = update;
                 }
             } else {
                 assert!(
@@ -144,21 +110,10 @@ impl Painter {
                 // self.textures.insert(id, delta.image.into());
                 match delta.image {
                     ImageData::Color(image) => {
-                        self.textures.insert(id, TextureKind::Color(color_image_to_texture(image)));
+                        self.textures.insert(id, color_image_to_texture(image));
                     }
                     ImageData::Font(image) => {
-                        let vec = image.srgba_pixels(None)
-                            .map(|val| {
-                                let [r, g, b, a] = egui::Rgba::from(val).to_rgba_unmultiplied();
-                                [
-                                    (r * 255.) as u8,
-                                    (g * 255.) as u8,
-                                    (b * 255.) as u8,
-                                    (a * 255.) as u8,
-                                ]
-                            }).collect();
-                        let texture = OwnedTexture::from_vec(image.width(), image.height(), vec);
-                        self.textures.insert(id, TextureKind::Color(texture));
+                        self.textures.insert(id, font_image_to_texture(image));
                     }
                 }
             }
