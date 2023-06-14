@@ -151,8 +151,8 @@ where
             TextureWrap::Repeat => (u.rem_euclid(1.), v.rem_euclid(1.)),
         };
 
-        let x = (u * self.width() as f32) as usize;
-        let y = ((1. - v) * self.height() as f32) as usize;
+        let x = (u * self.width() as f32 + 0.5) as usize;
+        let y = ((1. - v) * self.height() as f32 + 0.5) as usize;
 
         let x = x.clamp(0, self.width()-1);
         let y = y.clamp(0, self.height()-1);

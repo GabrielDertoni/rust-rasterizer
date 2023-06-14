@@ -149,10 +149,10 @@ fn draw_triangle<Attr, F>(
                     let prev_color = Vec::from(pixels[(x, y)]).to_f32() / 255.;
                     let color = frag_shader.exec_basic(interp);
                     let alpha = color.w;
+                    let blended = prev_color.xyz() * (1. - alpha) + color.xyz() * alpha;
+                    let final_color = Vec4::from([blended.x, blended.y, blended.z, 1.]).map(|chan| (chan.clamp(0., 1.) * 255.) as u8);
+                    pixels[(x, y)] = final_color.to_array();
                     if alpha > 0.1 {
-                        let blended = prev_color.xyz() * (1. - alpha) + color.xyz() * alpha;
-                        let final_color = Vec4::from([blended.x, blended.y, blended.z, 1.]).map(|chan| (chan.clamp(0., 1.) * 255.) as u8);
-                        pixels[(x, y)] = final_color.to_array();
                         if let Some(depth_buf) = &mut depth_buf {
                             depth_buf[(x, y)] = z;
                         }
