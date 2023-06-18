@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use egui::{ClippedPrimitive, TextureId, TexturesDelta};
 use epaint::{image::ImageData, Mesh, Primitive};
 
-use rasterization::texture::{BorrowedMutTexture, OwnedTexture};
+use rasterization::{texture::{BorrowedMutTexture, OwnedTexture}, pipeline::PipelineMode, FragmentShader, FragmentShaderSimd};
 
 fn color_image_to_texture(image: epaint::image::ColorImage) -> OwnedTexture<[u8; 4]> {
     let tex = OwnedTexture::from_vec(image.width(), image.height(), image.pixels);
@@ -58,7 +58,7 @@ impl Painter {
     }
 
     fn paint_mesh<'a>(&self, mesh: Mesh, egui_ctx: &egui::Context, color_buf: BorrowedMutTexture<'a, [u8; 4]>) {
-        use rasterization::{pipeline::Pipeline, prim3d::CullingMode};
+        use rasterization::{pipeline::Pipeline, config::CullingMode};
 
         eprintln!("painting mesh with {} triangles", mesh.indices.len() / 3);
 
@@ -67,7 +67,7 @@ impl Painter {
         let indices: Vec<usize> = mesh.indices.into_iter().map(|i| i as usize).collect();
         let (indices, tail) = indices.as_chunks::<3>();
         assert_eq!(tail.len(), 0);
-        let mut pipeline = Pipeline::new_basic(mesh.vertices.as_slice(), indices);
+        let mut pipeline = Pipeline::new(mesh.vertices.as_slice(), indices, PipelineMode::Basic2D);
         pipeline.set_culling_mode(CullingMode::Disabled);
         let width = color_buf.width();
         let height = color_buf.height();
@@ -78,11 +78,16 @@ impl Painter {
         });
         pipeline.draw(
             0..indices.len(),
-            &shaders::ColoredFrag {
+            shaders::ColoredFrag {
                 texture: tex.borrow(),
-            },
+            }.scalar_impl(),
         );
         pipeline.finalize();
+
+        if cfg!(feature = "performance-counters") {
+            let metrics = pipeline.get_metrics();
+            println!("{metrics}");
+        }
     }
 
     fn update_textures(&mut self, deltas: TexturesDelta) {
@@ -126,12 +131,12 @@ impl Painter {
 }
 
 mod shaders {
-    use std::simd::{LaneCount, Mask, Simd, SupportedLaneCount};
+    use std::simd::{Simd, Mask};
 
     use rasterization::{
         texture::{BorrowedTexture, TextureWrap},
-        vec::{Vec, Vec2, Vec4, Vec4xN},
-        Attributes, IntoSimd, StructureOfArray,
+        vec::{Vec, Vec2, Vec4, Vec2i, Vec4x4},
+        Attributes, AttributesSimd, IntoSimd, StructureOfArray,
     };
 
     pub struct Vert {
@@ -139,7 +144,7 @@ mod shaders {
         pub height: f32,
     }
 
-    #[derive(Clone, Copy, Attributes, IntoSimd)]
+    #[derive(Clone, Copy, IntoSimd, Attributes, AttributesSimd)]
     pub struct Attr {
         #[position]
         pub pos: Vec4,
@@ -170,22 +175,18 @@ mod shaders {
     }
 
     impl<'a> rasterization::FragmentShader<Attr> for ColoredFrag<'a> {
-        fn exec<const LANES: usize>(
-            &self,
-            _mask: Mask<i32, LANES>,
-            _pixel_coords: Vec<Simd<i32, LANES>, 2>,
-            _attrs: AttrSimd<LANES>,
-        ) -> Vec4xN<LANES>
-        where
-            LaneCount<LANES>: SupportedLaneCount,
-        {
-            todo!();
-        }
-
-        fn exec_basic(&self, attrs: Attr) -> Vec4 {
+        fn exec(&self, _pixel_coords: Vec2i, attrs: Attr) -> Vec4 {
             let tex = self.texture.index_uv(attrs.uv, TextureWrap::Clamp);
             let color = attrs.color;
             Vec4::from([color.x, color.y, color.z, color.w * tex.x])
+        }
+    }
+
+    impl<'a> rasterization::FragmentShaderSimd<Attr, 4> for ColoredFrag<'a> {
+        fn exec(&self, mask: Mask<i32, 4>, _pixel_coords: Vec<Simd<i32, 4>, 2>, attrs: AttrSimd<4>) -> Vec4x4 {
+            let tex = self.texture.simd_index_uv(attrs.uv, mask, TextureWrap::Clamp);
+            let color = attrs.color;
+            Vec4x4::from([color.x, color.y, color.z, color.w * tex.x])
         }
     }
 
@@ -194,19 +195,7 @@ mod shaders {
     }
 
     impl<'a> rasterization::FragmentShader<Attr> for FontFrag<'a> {
-        fn exec<const LANES: usize>(
-            &self,
-            _mask: Mask<i32, LANES>,
-            _pixel_coords: Vec<Simd<i32, LANES>, 2>,
-            _attrs: AttrSimd<LANES>,
-        ) -> Vec4xN<LANES>
-        where
-            LaneCount<LANES>: SupportedLaneCount,
-        {
-            todo!();
-        }
-
-        fn exec_basic(&self, attrs: Attr) -> Vec4 {
+        fn exec(&self, _pixel_coords: Vec2i, attrs: Attr) -> Vec4 {
             let ix = self.texture.get_index_from_uv(attrs.uv, TextureWrap::Clamp);
             let color = attrs.color.xyz() * self.texture[(ix.x, ix.y)];
             Vec4::from([color.x, color.y, color.z, attrs.color.w])

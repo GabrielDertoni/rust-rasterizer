@@ -5,8 +5,12 @@ edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+[features]
+default = []
+performance-counters = ["rasterization/performance-counters"]
+
 [dependencies]
-rasterization.path = ".."
+rasterization = { path = "..", default-features = false }
 egui = "0.22"
 epaint = "0.22"
 pixels = "0.12"

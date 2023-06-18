@@ -1,15 +1,15 @@
 use std::{
     marker::PhantomData,
-    ops::{Index, IndexMut, Bound, RangeBounds, Range},
-    simd::{LaneCount, Simd, Mask, SupportedLaneCount},
+    ops::{Bound, Index, IndexMut, Range, RangeBounds},
+    simd::{LaneCount, Mask, Simd, SupportedLaneCount, SimdFloat, SimdConstPtr},
 };
 
-pub use storage::*;
 pub use index_layout::*;
+pub use storage::*;
 
 use crate::{
-    vec::{Vec, Vec2, Vec2xN},
-    simd_config::LANES,
+    math_utils::{simd_clamp01, simd_wrap01},
+    vec::{Vec, Vec2, Vec4xN, Vec2xN},
 };
 
 pub struct Texture<T, S, I = RowMajor, Width: Dim = SomeNat, Height: Dim = SomeNat> {
@@ -110,22 +110,20 @@ where
     }
 
     pub fn as_slice<'a>(&'a self) -> &'a [T] {
-        unsafe {
-            std::slice::from_raw_parts(self.storage.ptr(), self.len())
-        }
+        unsafe { std::slice::from_raw_parts(self.storage.ptr(), self.len()) }
     }
 
     pub fn as_slice_mut<'a>(&'a mut self) -> &'a mut [T]
     where
         S: StorageMut,
     {
-        unsafe {
-            std::slice::from_raw_parts_mut(self.storage.ptr_mut(), self.len())
-        }
+        unsafe { std::slice::from_raw_parts_mut(self.storage.ptr_mut(), self.len()) }
     }
 
-    pub fn copy_from<S2, I2, Width2, Height2>(&mut self, other: &Texture<T, S2, I2, Width2, Height2>)
-    where
+    pub fn copy_from<S2, I2, Width2, Height2>(
+        &mut self,
+        other: &Texture<T, S2, I2, Width2, Height2>,
+    ) where
         T: Copy,
         S: StorageMut,
         Width2: Dim,
@@ -154,8 +152,8 @@ where
         let x = (u * self.width() as f32 + 0.5) as usize;
         let y = ((1. - v) * self.height() as f32 + 0.5) as usize;
 
-        let x = x.clamp(0, self.width()-1);
-        let y = y.clamp(0, self.height()-1);
+        let x = x.clamp(0, self.width() - 1);
+        let y = y.clamp(0, self.height() - 1);
         Vec::from([x, y])
     }
 }
@@ -165,12 +163,12 @@ pub enum TextureWrap {
     Repeat,
 }
 
-impl<S, Width, Height, I> Texture<[u8; 4], S, I, Width, Height>
+impl<S, I, Width, Height> Texture<[u8; 4], S, I, Width, Height>
 where
-    Width: Dim,
-    Height: Dim,
     S: Storage<Elem = [u8; 4]>,
     I: IndexLayout,
+    Width: Dim,
+    Height: Dim,
 {
     /// Index the matrix slice with uv coordinates. The access is repeated if the index is out of bounds.
     #[inline]
@@ -181,39 +179,55 @@ where
 
     /// Index the matrix slice with uv coordinates. The access is clamped if the index is out of bounds.
     #[inline]
-    pub fn simd_index_uv(
+    pub fn simd_index_uv<const LANES: usize>(
         &self,
         uv: Vec2xN<LANES>,
         mask: Mask<i32, LANES>,
-    ) -> Vec<Simd<u8, LANES>, 4>
+        wrap: TextureWrap
+    ) -> Vec4xN<LANES>
+    where
+        LaneCount<LANES>: SupportedLaneCount,
     {
-        use std::simd::{SimdPartialOrd, SimdFloat};
+        let uv = match wrap {
+            TextureWrap::Clamp => uv.map(simd_clamp01),
+            TextureWrap::Repeat => uv.map(simd_wrap01),
+        };
+
+        assert!(!uv.x.is_nan().any());
+        assert!(!uv.y.is_nan().any());
 
         let [u, v] = uv.to_array();
 
-        let u = u % Simd::splat(1.);
-        let v = v % Simd::splat(1.);
+        let x = u * Simd::splat((self.width() - 1) as f32);
+        let y = (Simd::splat(1.) - v) * Simd::splat((self.height() - 1) as f32);
 
-        // `.to_int()` will return 0 for `false` and `-1` for true
-        let u = u - u.is_sign_negative().to_int().cast();
-        let v = v - v.is_sign_negative().to_int().cast();
-
-        let x = (u * Simd::splat(self.width() as f32)).cast::<usize>();
-        let y = ((Simd::splat(1.) - v) * Simd::splat(self.height() as f32)).cast::<usize>();
-
-        let inbounds = x.simd_le(Simd::splat(self.width())) & y.simd_le(Simd::splat(self.height()));
-        assert!(inbounds.all(), "out of bounds");
-
-        let mask = mask.cast() & inbounds;
-        let u32_pixels = unsafe { self.borrow().cast::<u32>() };
-        let idx = self.indexer.get_index_simd(x, y);
-
-        // SAFETY: Already bounds checked
-        let values = unsafe { Simd::gather_select_unchecked(u32_pixels.as_slice(), mask, idx, Simd::splat(0)) };
         
-        Vec::from(values.to_array())
-            .map(|el| Simd::from_array(el.to_ne_bytes()))
-            .simd_transpose_4()
+        let values = unsafe {
+            // SAFETY: We either clamp or wrap the value, which already means it can't be `inf` or `-inf`. We also assert that no lanes are
+            // `NaN`. Thus we meet all the preconditions to call `to_int_unchecked()`.
+            let x = x.to_int_unchecked();
+            let y = y.to_int_unchecked();
+    
+            // TODO: Only allow construction of textures whose indicies fit into an `i32`
+            let idxs = self.indexer.get_index_simd_i32(x, y);
+
+            let u32_pixels = self.storage.ptr().cast::<u32>();
+            
+            // SAFETY: Skip bounds checking, since we know values can only be as high as `(width - 1) * (height - 1)`.
+            Simd::<u32, LANES>::gather_select_ptr(
+                Simd::splat(u32_pixels).wrapping_add(idxs.cast()),
+                mask.cast(),
+                Simd::splat(0)
+            )
+        };
+
+        let ff_mask = Simd::splat(0xff);
+        Vec::from([
+            ((values >> Simd::splat(24)) & ff_mask).cast(),
+            ((values >> Simd::splat(16)) & ff_mask).cast(),
+            ((values >> Simd::splat(8)) & ff_mask).cast(),
+            (values & ff_mask).cast(),
+        ]) / Simd::splat(255.)
     }
 }
 
@@ -223,6 +237,7 @@ where
     Height: Dim,
     I: IndexLayout,
 {
+    #[track_caller]
     pub fn from_slice(width: usize, height: usize, slice: &'a [T]) -> Self {
         assert_eq!(width * height, slice.len());
         Texture {
@@ -250,6 +265,7 @@ where
     Height: Dim,
     I: IndexLayout,
 {
+    #[track_caller]
     pub fn from_mut_slice(width: usize, height: usize, slice: &'a mut [T]) -> Self {
         assert_eq!(width * height, slice.len());
         Texture {
@@ -277,6 +293,7 @@ where
     Height: Dim,
     I: IndexLayout,
 {
+    #[track_caller]
     pub fn from_vec(width: usize, height: usize, vec: std::vec::Vec<T>) -> Self {
         assert_eq!(width * height, vec.len());
         Texture {
@@ -447,29 +464,29 @@ pub mod storage {
 
     pub trait Storage {
         type Elem;
-    
+
         fn ptr(&self) -> *const Self::Elem;
         fn borrow<'a>(&'a self) -> BorrowedStorage<'a, Self::Elem>;
     }
-    
+
     pub trait StorageMut: Storage {
         fn ptr_mut(&mut self) -> *mut Self::Elem;
         fn borrow_mut<'a>(&'a mut self) -> BorrowedMutStorage<'a, Self::Elem>;
     }
-    
+
     #[derive(Clone, Copy)]
     pub struct BorrowedStorage<'a, T> {
         pub(super) ptr: *const T,
         pub(super) _marker: PhantomData<&'a [T]>,
     }
-    
+
     impl<'s, T> Storage for BorrowedStorage<'s, T> {
         type Elem = T;
-    
+
         fn ptr(&self) -> *const T {
             self.ptr
         }
-    
+
         fn borrow<'a>(&'a self) -> BorrowedStorage<'a, Self::Elem> {
             BorrowedStorage {
                 ptr: self.ptr,
@@ -477,19 +494,19 @@ pub mod storage {
             }
         }
     }
-    
+
     pub struct BorrowedMutStorage<'a, T> {
         pub(super) ptr: *mut T,
         pub(super) _marker: PhantomData<&'a mut [T]>,
     }
-    
+
     impl<'s, T> Storage for BorrowedMutStorage<'s, T> {
         type Elem = T;
-    
+
         fn ptr(&self) -> *const T {
             self.ptr
         }
-    
+
         fn borrow<'a>(&'a self) -> BorrowedStorage<'a, Self::Elem> {
             BorrowedStorage {
                 ptr: self.ptr,
@@ -497,12 +514,12 @@ pub mod storage {
             }
         }
     }
-    
+
     impl<'s, T> StorageMut for BorrowedMutStorage<'s, T> {
         fn ptr_mut(&mut self) -> *mut T {
             self.ptr
         }
-    
+
         fn borrow_mut<'a>(&'a mut self) -> BorrowedMutStorage<'a, Self::Elem> {
             BorrowedMutStorage {
                 ptr: self.ptr,
@@ -510,18 +527,18 @@ pub mod storage {
             }
         }
     }
-    
+
     // TODO: This will store the length of the allocation, which isn't necessary since `MatrixSlice` already stores that
     #[derive(Clone)]
     pub struct OwnedStorage<T>(pub(super) Box<[T]>);
-    
+
     impl<T> Storage for OwnedStorage<T> {
         type Elem = T;
-    
+
         fn ptr(&self) -> *const T {
             self.0.as_ptr()
         }
-    
+
         fn borrow<'a>(&'a self) -> BorrowedStorage<'a, Self::Elem> {
             BorrowedStorage {
                 ptr: self.0.as_ptr(),
@@ -529,12 +546,12 @@ pub mod storage {
             }
         }
     }
-    
+
     impl<T> StorageMut for OwnedStorage<T> {
         fn ptr_mut(&mut self) -> *mut T {
             self.0.as_mut_ptr()
         }
-    
+
         fn borrow_mut<'a>(&'a mut self) -> BorrowedMutStorage<'a, Self::Elem> {
             BorrowedMutStorage {
                 ptr: self.0.as_mut_ptr(),
@@ -548,10 +565,11 @@ pub mod index_layout {
     use super::*;
 
     pub trait IndexLayout: Copy {
+        #[track_caller]
         fn from_size(width: usize, height: usize) -> Self;
-    
+
         fn get_index(&self, x: usize, y: usize) -> usize;
-    
+
         fn get_index_simd<const LANES: usize>(
             &self,
             x: Simd<usize, LANES>,
@@ -559,30 +577,42 @@ pub mod index_layout {
         ) -> Simd<usize, LANES>
         where
             LaneCount<LANES>: SupportedLaneCount;
+
+        /// SAFETY: The caller must be sure that the final index won't overflow a i32
+        unsafe fn get_index_simd_i32<const LANES: usize>(
+            &self,
+            x: Simd<i32, LANES>,
+            y: Simd<i32, LANES>,
+        ) -> Simd<i32, LANES>
+        where
+            LaneCount<LANES>: SupportedLaneCount,
+        {
+            self.get_index_simd(x.cast(), y.cast()).cast()
+        }
     }
-    
+
     #[derive(Clone, Copy)]
     pub struct RowMajor<Stride: Dim = SomeNat> {
         pub(super) stride: Stride,
     }
 
     impl<Stride: Dim> RowMajor<Stride> {
-        pub fn stride(&self) -> Stride {
-            self.stride
+        pub fn stride(&self) -> usize {
+            self.stride.to_usize()
         }
     }
-    
+
     impl<Stride: Dim> IndexLayout for RowMajor<Stride> {
         fn from_size(width: usize, _height: usize) -> Self {
             RowMajor {
                 stride: Stride::from_usize(width),
             }
         }
-    
+
         fn get_index(&self, x: usize, y: usize) -> usize {
             y * self.stride.to_usize() + x
         }
-    
+
         fn get_index_simd<const LANES: usize>(
             &self,
             x: Simd<usize, LANES>,
@@ -593,8 +623,69 @@ pub mod index_layout {
         {
             y * Simd::splat(self.stride.to_usize()) + x
         }
+
+        unsafe fn get_index_simd_i32<const LANES: usize>(
+            &self,
+            x: Simd<i32, LANES>,
+            y: Simd<i32, LANES>,
+        ) -> Simd<i32, LANES>
+        where
+            LaneCount<LANES>: SupportedLaneCount,
+        {
+            y * Simd::splat(self.stride() as i32) + x
+        }
     }
-    
+
+    #[derive(Clone, Copy)]
+    pub struct RowMajorPowerOf2<StrideExp: Dim = SomeNat> {
+        pub(super) stride_exponent: StrideExp,
+    }
+
+    impl<StrideExp: Dim> RowMajorPowerOf2<StrideExp> {
+        pub fn stride(&self) -> usize {
+            1 << self.stride_exponent.to_usize()
+        }
+    }
+
+    impl<StrideExp: Dim> IndexLayout for RowMajorPowerOf2<StrideExp> {
+        #[track_caller]
+        fn from_size(width: usize, _height: usize) -> Self {
+            assert!(width.is_power_of_two(), "expected width to be a power of two, but instead is {width}");
+            RowMajorPowerOf2 {
+                stride_exponent: StrideExp::from_usize(width.ilog2() as usize),
+            }
+        }
+
+        #[inline(always)]
+        fn get_index(&self, x: usize, y: usize) -> usize {
+            (y << self.stride_exponent.to_usize()) | x
+        }
+
+        #[inline(always)]
+        fn get_index_simd<const LANES: usize>(
+            &self,
+            x: Simd<usize, LANES>,
+            y: Simd<usize, LANES>,
+        ) -> Simd<usize, LANES>
+        where
+            LaneCount<LANES>: SupportedLaneCount,
+        {
+            (y << Simd::splat(self.stride_exponent.to_usize())) | x
+        }
+
+        #[inline(always)]
+        unsafe fn get_index_simd_i32<const LANES: usize>(
+            &self,
+            x: Simd<i32, LANES>,
+            y: Simd<i32, LANES>,
+        ) -> Simd<i32, LANES>
+        where
+            LaneCount<LANES>: SupportedLaneCount,
+        {
+            (y << Simd::splat(self.stride_exponent.to_usize() as i32)) | x
+        }
+    }
+
     #[derive(Clone, Copy)]
     pub struct ColumnMajor<Stride: Dim = SomeNat> {
         pub(super) stride: Stride,
@@ -605,18 +696,18 @@ pub mod index_layout {
             self.stride
         }
     }
-    
+
     impl<Stride: Dim> IndexLayout for ColumnMajor<Stride> {
         fn from_size(_width: usize, height: usize) -> Self {
             ColumnMajor {
                 stride: Stride::from_usize(height),
             }
         }
-    
+
         fn get_index(&self, x: usize, y: usize) -> usize {
             x * self.stride.to_usize() + y
         }
-    
+
         fn get_index_simd<const LANES: usize>(
             &self,
             x: Simd<usize, LANES>,
@@ -628,7 +719,7 @@ pub mod index_layout {
             x * Simd::splat(self.stride.to_usize()) + y
         }
     }
-    
+
     #[derive(Clone, Copy)]
     pub struct Tiled<
         const TILE_X: usize,
@@ -640,7 +731,7 @@ pub mod index_layout {
         stride: Stride,
         inner: Inner,
     }
-    
+
     impl<const TILE_X: usize, const TILE_Y: usize, Inner: IndexLayout, Stride: Dim> IndexLayout
         for Tiled<TILE_X, TILE_Y, Inner, Stride>
     {
@@ -652,7 +743,7 @@ pub mod index_layout {
                 inner: Inner::from_size(TILE_X, TILE_Y),
             }
         }
-    
+
         fn get_index(&self, x: usize, y: usize) -> usize {
             // (y / TILE_Y) * self.stride.to_usize()
             //     + (x / TILE_X) * (TILE_X * TILE_Y)
@@ -662,7 +753,7 @@ pub mod index_layout {
                 + (x / TILE_X) * (TILE_X * TILE_Y)
                 + self.inner.get_index(y % TILE_Y, x % TILE_X)
         }
-    
+
         fn get_index_simd<const LANES: usize>(
             &self,
             x: Simd<usize, LANES>,
@@ -678,12 +769,12 @@ pub mod index_layout {
                     .get_index_simd(y % Simd::splat(TILE_Y), x % Simd::splat(TILE_X))
         }
     }
-    
+
     #[derive(Clone, Copy)]
     pub struct ZCurve {
         pub(super) _priv: (),
     }
-    
+
     impl IndexLayout for ZCurve {
         fn from_size(width: usize, height: usize) -> Self {
             assert_eq!(
@@ -693,7 +784,7 @@ pub mod index_layout {
             assert!(width < u32::MAX as usize, "maximum size exceeded");
             ZCurve { _priv: () }
         }
-    
+
         // source: https://lemire.me/blog/2018/01/08/how-fast-can-you-bit-interleave-32-bit-integers/
         fn get_index(&self, x: usize, y: usize) -> usize {
             use std::arch::x86_64::_pdep_u64;
@@ -702,7 +793,7 @@ pub mod index_layout {
             };
             idx as usize
         }
-    
+
         // source: https://lemire.me/blog/2018/01/09/how-fast-can-you-bit-interleave-32-bit-integers-simd-edition/
         fn get_index_simd<const LANES: usize>(
             &self,

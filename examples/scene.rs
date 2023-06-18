@@ -20,8 +20,10 @@ use rasterization::{
     utils::{FpvCamera, FpsCounter},
     vec::Vec3,
     texture::OwnedTexture,
-    VertBuf, VertexBuf,
-    scene::{Light, Scene, RenderingConfig},
+    vert_buf::{VertBuf, self}, VertexBuf,
+    config::{Light, Scene, RenderingConfig, RasterizerConfig, RasterizerImplementation},
+    pipeline::PipelineMode,
+    FragmentShaderSimd,
 };
 
 struct Model {
@@ -43,7 +45,7 @@ struct LightInfo {
 }
 
 pub struct World {
-    vert_buf: VertBuf,
+    vert_buf: Vec<rasterization::Vertex>,
     index_buf: Vec<[usize; 3]>,
     materials: Vec<Material>,
     models: Vec<Model>,
@@ -55,6 +57,7 @@ pub struct World {
     enable_logging: bool,
     enable_shadows: bool,
     rendering_cfg: RenderingConfig,
+    rasterizer_cfg: RasterizerConfig,
 }
 
 impl World {
@@ -78,6 +81,7 @@ impl World {
                 "Model {:?} initially had {} positions, {} normals and {} uvs. Now converted into {} distict vertices",
                 model.path, obj.verts.len(), obj.normals.len(), obj.uvs.len(), n_vert
             );
+            println!("Model has {} faces", obj.tris.len());
 
             let offset = index_buf.len();
             let mut textured_subsets: Vec<TexturedSubset> = obj.use_material.into_iter()
@@ -112,7 +116,30 @@ impl World {
                 textured_subsets,
                 face_range: offset..offset + n_faces,
             });
-            materials.extend(obj.materials.into_iter());
+            materials.extend(
+                obj.materials.into_iter()
+                    .map(|mut mat| {
+                        let (orig_width, orig_height) = (mat.map_kd.width() as usize, mat.map_kd.height() as usize);
+                        let (mut width, mut height) = (orig_width as usize, orig_height as usize);
+                        if !width.is_power_of_two() {
+                            width = width.next_power_of_two();
+                        }
+                        if !height.is_power_of_two() {
+                            height = height.next_power_of_two();
+                        }
+                        if width != orig_width || height != orig_height {
+                            let mut buf = vec![0u8; width * height * 4];
+                            let slice = &mat.map_kd as &[u8];
+                            for row in 0..orig_height {
+                                let start_row = row * width * 4;
+                                let start_row_orig = row * orig_width * 4;
+                                buf[start_row..start_row + orig_width * 4].copy_from_slice(&slice[start_row_orig..start_row_orig + orig_width * 4]);
+                            }
+                            mat.map_kd = image::ImageBuffer::<image::Rgba<u8>, _>::from_vec(width as u32, height as u32, buf).unwrap();
+                        }
+                        mat
+                    })
+            );
         }
 
         let lights = scene.lights.into_iter().map(|light| {
@@ -134,6 +161,8 @@ impl World {
         let height = scene.rendering.height;
         let aspect_ratio = width as f32 / height as f32;
 
+        let vert_buf = (0..vert_buf.len()).map(|i| vert_buf.index(i)).collect();
+
         Ok(World {
             vert_buf,
             index_buf,
@@ -147,6 +176,7 @@ impl World {
             enable_logging: true,
             enable_shadows,
             rendering_cfg: scene.rendering,
+            rasterizer_cfg: scene.rasterizer,
         })
     }
 
@@ -194,12 +224,22 @@ impl World {
         let camera_transform = self.camera.transform_matrix(self.rendering_cfg.near, self.rendering_cfg.far);
 
         let vert_shader = shaders::textured::TexturedVertexShader::new(camera_transform);
-        let mut pipeline = Pipeline::new_basic(&self.vert_buf, &self.index_buf);
+        let mut pipeline = Pipeline::new(&self.vert_buf, &self.index_buf, PipelineMode::Simd3D);
+
+        pipeline
+            .with_alpha_clip(self.rendering_cfg.alpha_clip)
+            .with_culling(self.rendering_cfg.culling_mode)
+            .with_mode(match self.rasterizer_cfg.implementation {
+                RasterizerImplementation::BBoxSimd => PipelineMode::Simd3D,
+                RasterizerImplementation::BBox => PipelineMode::Basic3D,
+                RasterizerImplementation::Scanline => todo!(),
+            });
 
         pipeline.set_color_buffer(pixels);
         pipeline.set_depth_buffer(depth_buf);
         let mut pipeline = pipeline.process_vertices(&vert_shader);
 
+        let start = std::time::Instant::now();
         for model in &self.models {
             for subset in &model.textured_subsets {
                 let texture = &self.materials[subset.material_idx].map_kd;
@@ -211,9 +251,10 @@ impl World {
                 );
                 let frag_shader = shaders::textured::TexturedFragmentShader::new(texture);
     
-                pipeline.draw(subset.range.clone(), &frag_shader);
+                pipeline.draw(subset.range.clone(), FragmentShaderSimd::<_, 8>::simd_impl(&frag_shader));
             }
         }
+        println!("time to render models: {:?}", start.elapsed());
         pipeline.finalize();
         let metrics = pipeline.get_metrics();
         println!("{metrics}");

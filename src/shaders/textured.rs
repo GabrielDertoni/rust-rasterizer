@@ -1,12 +1,12 @@
 use crate::{
-    texture::{BorrowedTextureRGBA, TextureWrap},
-    vec::{Mat4x4, Vec, Vec2, Vec4},
-    Attributes, FragmentShader, IntoSimd, StructureOfArray, Vertex, VertexShader, VertexSimd,
+    texture::{BorrowedTextureRGBA, TextureWrap, RowMajorPowerOf2},
+    vec::{Mat4x4, Vec, Vec2, Vec4, Vec4x4, Vec4xN},
+    Attributes, AttributesSimd, IntoSimd, StructureOfArray, Vertex, VertexShader, FragmentShaderSimd,
 };
 
-use std::simd::{LaneCount, Mask, Simd, SimdPartialEq, SupportedLaneCount};
+use std::simd::{Mask, Simd, LaneCount, SupportedLaneCount};
 
-#[derive(Clone, Copy, Debug, IntoSimd, Attributes)]
+#[derive(Clone, Copy, Debug, IntoSimd, Attributes, AttributesSimd)]
 pub struct TexturedAttributes {
     #[position]
     pub position_ndc: Vec4,
@@ -50,58 +50,49 @@ impl VertexShader<Vertex> for TexturedVertexShader {
 }
 
 pub struct TexturedFragmentShader<'a> {
-    texture: BorrowedTextureRGBA<'a>,
+    texture: BorrowedTextureRGBA<'a, RowMajorPowerOf2>,
 }
 
 impl<'a> TexturedFragmentShader<'a> {
-    pub fn new(texture: BorrowedTextureRGBA<'a>) -> Self {
+    pub fn new(texture: BorrowedTextureRGBA<'a, RowMajorPowerOf2>) -> Self {
         TexturedFragmentShader { texture }
     }
 }
 
-impl<'a> FragmentShader<TexturedAttributes> for TexturedFragmentShader<'a> {
+impl<'a, const LANES: usize> FragmentShaderSimd<TexturedAttributes, LANES> for TexturedFragmentShader<'a>
+where
+    LaneCount<LANES>: SupportedLaneCount,
+{
     #[inline(always)]
-    fn exec<const LANES: usize>(
+    fn exec(
         &self,
-        _mask: Mask<i32, LANES>,
+        mask: Mask<i32, LANES>,
         _pixel_coords: Vec<Simd<i32, LANES>, 2>,
-        _attrs: TexturedAttributesSimd<LANES>,
-    ) -> Vec<Simd<f32, LANES>, 4>
-    where
-        LaneCount<LANES>: SupportedLaneCount,
+        attrs: TexturedAttributesSimd<LANES>,
+    ) -> Vec4xN<LANES>
     {
-        panic!("unsupported")
+        self.texture.simd_index_uv(attrs.uv, mask, TextureWrap::Repeat)
     }
 
-    #[inline(always)]
-    fn exec_specialized(
-        &self,
-        mask: &mut Mask<i32, 4>,
-        attrs: TexturedAttributesSimd<4>,
-        _pixel_coords: Vec<Simd<i32, 4>, 2>,
-        pixels: &mut Simd<u32, 4>,
-    ) {
-        let colors = self.texture.simd_index_uv(attrs.uv, *mask);
-        let colors = Simd::from(
-            colors
-                .map(|el| u32::from_ne_bytes(el.to_array()))
-                .to_array(),
-        );
+    // #[inline(always)]
+    // fn exec_specialized(
+    //     &self,
+    //     mask: &mut Mask<i32, 4>,
+    //     attrs: TexturedAttributesSimd<4>,
+    //     _pixel_coords: Vec<Simd<i32, 4>, 2>,
+    //     pixels: &mut Simd<u32, 4>,
+    // ) {
 
-        // Will be 1s where the pixel is visible
-        let alpha = colors.as_array()[3];
-        let alpha_mask = Simd::from_array(alpha.to_ne_bytes()).simd_eq(Simd::splat(0xff));
+    //     // Will be 1s where the pixel is visible
+    //     let alpha = colors.as_array()[3];
+    //     let alpha_mask = Simd::from_array(alpha.to_ne_bytes()).simd_eq(Simd::splat(0xff));
 
-        // Update the original mask to not update the depth buffer when we hit a transparent pixel
-        *mask &= alpha_mask.cast();
+    //     // Update the original mask to not update the depth buffer when we hit a transparent pixel
+    //     *mask &= alpha_mask.cast();
 
-        let mask = mask.cast::<i8>();
-        let mask = Simd::splat(u32::from_ne_bytes(mask.to_int().cast().to_array()));
+    //     let mask = mask.cast::<i8>();
+    //     let mask = Simd::splat(u32::from_ne_bytes(mask.to_int().cast().to_array()));
 
-        *pixels = (colors & mask) + (*pixels & !mask);
-    }
-
-    fn exec_basic(&self, attrs: TexturedAttributes) -> Vec4 {
-        self.texture.index_uv(attrs.uv, TextureWrap::Repeat)
-    }
+    //     *pixels = (colors & mask) + (*pixels & !mask);
+    // }
 }

@@ -5,30 +5,38 @@
     int_roundings,
     split_array,
     str_split_whitespace_remainder,
-    pointer_is_aligned
+    pointer_is_aligned,
+    never_type
 )]
 
+pub(crate) mod common;
+
 pub mod buf;
+pub mod vert_buf;
 pub mod obj;
+pub mod pipeline;
+pub mod prim2d;
 pub mod prim3d;
+pub mod config;
+pub mod simd_config;
 pub mod texture;
 pub mod utils;
 pub mod vec;
-pub mod pipeline;
-pub mod simd_config;
-pub mod scene;
+pub mod math_utils;
 
 // TODO: Move to separate crate
-pub mod frag_shaders;
+// pub mod frag_shaders;
 pub mod shaders;
 
 pub type ScreenPos = (i32, i32, f32);
 pub type Pixel = [u8; 4];
 
+use core::panic;
 use std::simd::{LaneCount, Mask, Simd, SimdElement, SupportedLaneCount};
 
 use texture::BorrowedMutTexture;
-use vec::{Mat4x4, Vec, Vec2, Vec3, Vec4, Vec4xN};
+use vec::{Vec, Vec2, Vec3, Vec4, Vec4xN};
+use vec::{Vec2i, Vec3xN};
 
 pub fn triangles_iter<'a, V>(
     vert: &'a [V],
@@ -52,264 +60,115 @@ pub struct Vertex {
     pub uv: Vec2,
 }
 
-/// INVARIANT: The length of all fields is the same
-#[derive(Clone, Default)]
-pub struct VertBuf {
-    pub positions: std::vec::Vec<Vec4>,
-    pub normals: std::vec::Vec<Vec3>,
-    pub uvs: std::vec::Vec<Vec2>,
+pub struct FragmentShaderSimdDefaultImpl<F>(F);
+
+impl<F, A, const LANES: usize> FragmentShaderSimd<AttributesSimdDefaultImpl<A>, LANES>
+    for FragmentShaderSimdDefaultImpl<F>
+where
+    LaneCount<LANES>: SupportedLaneCount,
+    F: FragmentShader<A>,
+    A: Attributes + IntoSimd + Copy,
+{
+    fn exec(
+        &self,
+        mask: Mask<i32, LANES>,
+        pixel_coords: Vec<Simd<i32, LANES>, 2>,
+        attrs: AttributesSimdDefaultImplSimd<A::Simd<LANES>>,
+    ) -> Vec4xN<LANES> {
+        Vec4xN::from_array(std::array::from_fn(|lane| {
+            if mask.test(lane) {
+                self.0.exec(pixel_coords.index(lane), attrs.index(lane).0)
+            } else {
+                Vec4::zero()
+            }
+        }))
+    }
 }
 
-impl VertBuf {
-    pub fn new() -> Self {
-        Self::default()
-    }
+pub enum FragmentShaderImpl<'a, Scalar: ?Sized, Simd: ?Sized> {
+    Scalar(&'a Scalar),
+    Simd(&'a Simd),
+}
 
-    pub fn with_capacity(cap: usize) -> Self {
-        VertBuf {
-            positions: std::vec::Vec::with_capacity(cap),
-            normals: std::vec::Vec::with_capacity(cap),
-            uvs: std::vec::Vec::with_capacity(cap),
+impl<'a, Scalar: ?Sized, Simd: ?Sized> FragmentShaderImpl<'a, Scalar, Simd> {
+    pub fn unwrap_scalar(self) -> &'a Scalar {
+        match self {
+            FragmentShaderImpl::Scalar(scalar) => scalar,
+            _ => panic!("expected a scalar impl"),
         }
     }
 
-    pub fn push(&mut self, vertex: Vertex) {
-        self.positions.push(vertex.position);
-        self.normals.push(vertex.normal);
-        self.uvs.push(vertex.uv);
-    }
-
-    pub fn from_obj(obj: &obj::Obj) -> (Self, std::vec::Vec<[usize; 3]>) {
-        let mut vert_idxs_set = obj
-            .tris
-            .iter()
-            .copied()
-            .flatten()
-            .collect::<std::vec::Vec<_>>();
-        vert_idxs_set.sort_unstable();
-        vert_idxs_set.dedup();
-        let vert_buf = vert_idxs_set.iter()
-            .map(|idxs| Vertex {
-                position: obj.verts[idxs.position as usize],
-                normal: obj.normals[idxs.normal as usize],
-                uv: obj.uvs[idxs.uv as usize],
-            })
-            .collect();
-
-        let index_buf = obj.tris.iter()
-            .map(|tri| tri.map(|v| vert_idxs_set.binary_search(&v).unwrap()))
-            .collect();
-
-        (vert_buf, index_buf)
-    }
-}
-
-impl VertexBuf for VertBuf {
-    type Vertex = Vertex;
-
-    fn index(&self, index: usize) -> Vertex {
-        Vertex {
-            position: self.positions[index],
-            normal: self.normals[index],
-            uv: self.uvs[index],
-        }
-    }
-
-    fn len(&self) -> usize {
-        debug_assert_eq!(self.positions.len(), self.normals.len());
-        debug_assert_eq!(self.positions.len(), self.uvs.len());
-        self.positions.len()
-    }
-}
-
-impl FromIterator<Vertex> for VertBuf {
-    fn from_iter<T: IntoIterator<Item = Vertex>>(iter: T) -> Self {
-        let mut vert_buf = VertBuf::default();
-        vert_buf.extend(iter);
-        vert_buf
-    }
-}
-
-impl std::iter::Extend<Vertex> for VertBuf {
-    fn extend<T: IntoIterator<Item = Vertex>>(&mut self, iter: T) {
-        for vertex in iter {
-            self.push(vertex)
+    pub fn unwrap_simd(self) -> &'a Simd {
+        match self {
+            FragmentShaderImpl::Simd(simd) => simd,
+            _ => panic!("expected a simd impl"),
         }
     }
 }
 
-impl std::iter::IntoIterator for VertBuf {
-    type Item = Vertex;
-    type IntoIter = VertBufIterator;
-
-    fn into_iter(self) -> VertBufIterator {
-        VertBufIterator {
-            positions: self.positions.into_iter(),
-            normals: self.normals.into_iter(),
-            uvs: self.uvs.into_iter(),
-        }
+impl<'a, Scalar: ?Sized> FragmentShaderImpl<'a, Scalar, !> {
+    pub fn scalar(scalar: &'a Scalar) -> Self {
+        FragmentShaderImpl::Scalar(scalar)
     }
 }
 
-pub struct VertBufIterator {
-    positions: std::vec::IntoIter<Vec4>,
-    normals: std::vec::IntoIter<Vec3>,
-    uvs: std::vec::IntoIter<Vec2>,
-}
-
-impl Iterator for VertBufIterator {
-    type Item = Vertex;
-
-    fn next(&mut self) -> Option<Vertex> {
-        Some(Vertex {
-            position: self.positions.next()?,
-            normal: self.normals.next()?,
-            uv: self.uvs.next()?,
-        })
-    }
-}
-
-/// INVARIANT: The length of all fields is the same
-#[derive(Clone, Copy)]
-pub struct VertBufSlice<'a> {
-    pub positions: &'a [Vec4],
-    pub normals: &'a [Vec3],
-    pub uvs: &'a [Vec2],
-}
-
-impl<'a> VertexBuf for VertBufSlice<'a> {
-    type Vertex = Vertex;
-
-    #[inline(always)]
-    fn index(&self, index: usize) -> Vertex {
-        Vertex {
-            position: self.positions[index],
-            normal: self.normals[index],
-            uv: self.uvs[index],
-        }
-    }
-
-    fn len(&self) -> usize {
-        debug_assert_eq!(self.positions.len(), self.normals.len());
-        debug_assert_eq!(self.positions.len(), self.uvs.len());
-        self.positions.len()
-    }
-}
-
-pub struct VertShader {
-    transform: Mat4x4,
-}
-
-impl VertShader {
-    pub fn new(transform: Mat4x4) -> Self {
-        VertShader { transform }
-    }
-}
-
-impl VertexShader<Vertex> for VertShader {
-    type Output = Vertex;
-
-    fn exec(&self, vertex: Vertex) -> Self::Output {
-        Vertex {
-            position: self.transform * vertex.position,
-            normal: vertex.normal,
-            uv: vertex.uv,
-        }
+impl<'a, Simd: ?Sized> FragmentShaderImpl<'a, !, Simd> {
+    pub fn simd(simd: &'a Simd) -> Self {
+        FragmentShaderImpl::Simd(simd)
     }
 }
 
 pub trait FragmentShader<A: Attributes> {
-    fn exec<const LANES: usize>(
+    fn exec(&self, pixel_coords: Vec2i, attrs: A) -> Vec4;
+
+    fn into_impl(&self) -> FragmentShaderImpl<Self, !> {
+        FragmentShaderImpl::Scalar(self)
+    }
+
+    fn scalar_impl(&self) -> FragmentShaderImpl<Self, !> {
+        self.into_impl()
+    }
+}
+
+pub trait FragmentShaderSimd<A: AttributesSimd<LANES>, const LANES: usize>
+where
+    LaneCount<LANES>: SupportedLaneCount,
+{
+    fn exec(
         &self,
         mask: Mask<i32, LANES>,
         pixel_coords: Vec<Simd<i32, LANES>, 2>,
         attrs: A::Simd<LANES>,
-    ) -> Vec4xN<LANES>
-    where
-        LaneCount<LANES>: SupportedLaneCount;
+    ) -> Vec4xN<LANES>;
 
-    fn exec_specialized(
-        &self,
-        mask: &mut Mask<i32, 4>,
-        attrs: A::Simd<4>,
-        pixel_coords: Vec<Simd<i32, 4>, 2>,
-        pixels: &mut Simd<u32, 4>,
-    ) {
-        use std::simd::SimdFloat;
-
-        let colors = Simd::from(
-            self.exec(*mask, pixel_coords, attrs)
-                .map(|el| {
-                    u32::from_ne_bytes(
-                        (el.simd_clamp(Simd::splat(0.0), Simd::splat(1.0)) * Simd::splat(255.0))
-                            .cast::<u8>()
-                            .to_array(),
-                    )
-                })
-                .to_array(),
-        );
-
-        // Casting the mask to i8, makes the mask structure have 8x4=32 bits. Since -1 represents true
-        // in the mask, and bits are stored in twos-compliment, that is a bitset with only 1s when true
-        // If we then convert the mask to u32, we'll have a mask for the pixels. We just broadcast this
-        // to every channel and mask the things we want.
-        let mask = mask.cast::<i8>();
-        let mask = Simd::splat(u32::from_ne_bytes(mask.to_int().cast().to_array()));
-
-        *pixels = (colors & mask) + (*pixels & !mask)
+    fn into_impl(&self) -> FragmentShaderImpl<!, Self> {
+        FragmentShaderImpl::Simd(self)
     }
 
-    fn exec_basic(&self, attrs: A) -> Vec4 {
-        todo!();
+    fn simd_impl(&self) -> FragmentShaderImpl<!, Self> {
+        self.into_impl()
     }
 }
 
-pub trait VertexShader<Vertex/*: IntoSimd*/> {
+impl<A: Attributes> FragmentShader<A> for ! {
+    fn exec(&self, _: Vec2i, _: A) -> Vec4 {
+        match *self {}
+    }
+}
+
+impl<A: AttributesSimd<LANES>, const LANES: usize> FragmentShaderSimd<A, LANES> for !
+where
+    LaneCount<LANES>: SupportedLaneCount,
+{
+    fn exec(&self, _: Mask<i32, LANES>, _: Vec<Simd<i32, LANES>, 2>, _: A::Simd<LANES>) -> Vec4xN<LANES> {
+        match *self {}
+    }
+}
+
+pub trait VertexShader<Vertex /*: IntoSimd*/> {
     type Output: Attributes;
 
     fn exec(&self, vertex: Vertex) -> Self::Output;
-
-    /*
-    fn exec_simd<const LANES: usize>(
-        &self,
-        vertex: Vertex::Simd<LANES>,
-    ) -> <Self::Output as IntoSimd>::Simd<LANES>
-    where
-        LaneCount<LANES>: SupportedLaneCount,
-    {
-        struct ConstFn<'a, T, Vertex, const LANES: usize>
-        where
-            LaneCount<LANES>: SupportedLaneCount,
-            Vertex: IntoSimd,
-            T: VertexShader<Vertex> + ?Sized,
-        {
-            shader: &'a T,
-            vertex: Vertex::Simd<LANES>,
-        }
-
-        impl<'a, Vertex, T, const LANES: usize> vec::detail::ConstFn for ConstFn<'a, T, Vertex, LANES>
-        where
-            LaneCount<LANES>: SupportedLaneCount,
-            Vertex: IntoSimd,
-            T: VertexShader<Vertex> + ?Sized,
-        {
-            type Output = T::Output;
-
-            fn call<const I: usize>(&mut self) -> Self::Output {
-                self.shader.exec(self.vertex.index(I))
-            }
-
-            fn call_runtime(&mut self, i: usize) -> Self::Output {
-                self.shader.exec(self.vertex.index(i))
-            }
-        }
-
-        StructureOfArray::from_array(vec::detail::array_from_fn(ConstFn {
-            shader: self,
-            vertex,
-        }))
-    }
-    */
 }
 
 #[macro_export]
@@ -361,37 +220,16 @@ where
 }
 
 pub use macros::Attributes;
-pub trait Attributes: IntoSimd + Sized {
-    fn interpolate<const LANES: usize>(
-        p0: &Self,
-        p1: &Self,
-        p2: &Self,
-        w: Vec<Simd<f32, LANES>, 3>,
-    ) -> Self::Simd<LANES>
-    where
-        LaneCount<LANES>: SupportedLaneCount;
 
-    fn interpolate_basic(p0: &Self, p1: &Self, p2: &Self, w: Vec<f32, 3>) -> Self;
+pub trait Attributes {
+    fn interpolate(p0: &Self, p1: &Self, p2: &Self, w: Vec<f32, 3>) -> Self;
 
     fn position(&self) -> &Vec4;
     fn position_mut(&mut self) -> &mut Vec4;
 }
 
 impl Attributes for Vec4 {
-    #[inline(always)]
-    fn interpolate<const LANES: usize>(
-        p0: &Self,
-        p1: &Self,
-        p2: &Self,
-        w: Vec<Simd<f32, LANES>, 3>,
-    ) -> Self::Simd<LANES>
-    where
-        LaneCount<LANES>: SupportedLaneCount,
-    {
-        w.x * p0.splat() + w.y * p1.splat() + w.z * p2.splat()
-    }
-
-    fn interpolate_basic(&p0: &Self, &p1: &Self, &p2: &Self, w: Vec<f32, 3>) -> Self {
+    fn interpolate(&p0: &Self, &p1: &Self, &p2: &Self, w: Vec<f32, 3>) -> Self {
         w.x * p0 + w.y * p1 + w.z * p2
     }
 
@@ -404,149 +242,76 @@ impl Attributes for Vec4 {
     }
 }
 
-/*
-/// The empty attribute set
-impl Attributes for () {
-    type Simd<const LANES: usize> = ()
-    where
-        LaneCount<LANES>: SupportedLaneCount;
+pub use macros::AttributesSimd;
 
-    #[inline(always)]
-    fn splat<const LANES: usize>(self) -> Self::Simd<LANES>
-    where
-        LaneCount<LANES>: SupportedLaneCount,
-    {
-        ()
-    }
-
-    #[inline(always)]
-    fn interpolate<const LANES: usize>(
-        (): &Self,
-        (): &Self,
-        (): &Self,
-        _: Vec<Simd<f32, LANES>, 3>,
-    ) -> Self::Simd<LANES>
-    where
-        LaneCount<LANES>: SupportedLaneCount,
-    {
-        ()
-    }
+pub trait AttributesSimd<const LANES: usize>: IntoSimd
+where
+    LaneCount<LANES>: SupportedLaneCount,
+{
+    fn interpolate(p0: &Self, p1: &Self, p2: &Self, w: Vec3xN<LANES>) -> Self::Simd<LANES>;
 }
 
-/// The empty attribute set
-impl<const M: usize, const N: usize> Attributes for vec::Mat<f32, M, N> {
-    type Simd<const LANES: usize> = vec::Mat<Simd<f32, LANES>, M, N>
-    where
-        LaneCount<LANES>: SupportedLaneCount;
-
+impl<const LANES: usize> AttributesSimd<LANES> for Vec4
+where
+    LaneCount<LANES>: SupportedLaneCount,
+{
     #[inline(always)]
-    fn splat<const LANES: usize>(self) -> Self::Simd<LANES>
-    where
-        LaneCount<LANES>: SupportedLaneCount,
-    {
-        self.splat()
-    }
-
-    #[inline(always)]
-    fn interpolate<const LANES: usize>(
-        p0: &Self,
-        p1: &Self,
-        p2: &Self,
-        w: Vec<Simd<f32, LANES>, 3>,
-    ) -> Self::Simd<LANES>
-    where
-        LaneCount<LANES>: SupportedLaneCount,
-    {
+    fn interpolate(p0: &Self, p1: &Self, p2: &Self, w: Vec3xN<LANES>) -> Self::Simd<LANES> {
         w.x * p0.splat() + w.y * p1.splat() + w.z * p2.splat()
     }
 }
 
-macro_rules! impl_attributes_tuple {
-    () => {};
-    ($($ty:ident : $idx:tt),+; $($rest:tt)*) => {
-        impl_attributes_tuple!($($ty : $idx),+);
-        impl_attributes_tuple!($($rest)*);
-    };
-    ($($ty:ident : $idx:tt),+) => {
-        #[allow(unused_parens)] // No idea why it says those parenthesis are unecessary...
-        impl<$($ty),+> Attributes for ($($ty,)+)
-        where
-            $($ty: Attributes,)+
-        {
-            type Simd<const LANES: usize> = ($(<$ty as Attributes>::Simd<LANES>),+)
-            where
-                LaneCount<LANES>: SupportedLaneCount;
+pub struct AttributesSimdDefaultImpl<A>(A);
 
-            #[inline(always)]
-            fn splat<const LANES: usize>(self) -> Self::Simd<LANES>
-            where
-                LaneCount<LANES>: SupportedLaneCount,
-            {
-                ($(self.$idx.splat()),+)
-            }
+pub struct AttributesSimdDefaultImplSimd<S>(S);
 
-            #[inline(always)]
-            fn interpolate<const LANES: usize>(
-                p0: &Self,
-                p1: &Self,
-                p2: &Self,
-                w: Vec<Simd<f32, LANES>, 3>,
-            ) -> Self::Simd<LANES>
-            where
-                LaneCount<LANES>: SupportedLaneCount,
-            {
-                ($(<$ty as Attributes>::interpolate(&p0.$idx, &p1.$idx, &p2.$idx, w)),+)
-            }
-        }
-    };
-}
+impl<A: IntoSimd + Copy> IntoSimd for AttributesSimdDefaultImpl<A> {
+    type Simd<const LANES: usize> = AttributesSimdDefaultImplSimd<A::Simd<LANES>>
+    where
+        LaneCount<LANES>: SupportedLaneCount;
 
-impl_attributes_tuple!(
-    T0: 0;
-    T0: 0, T1: 1;
-    T0: 0, T1: 1, T2: 2;
-    T0: 0, T1: 1, T2: 2, T3: 3;
-    T0: 0, T1: 1, T2: 2, T3: 3, T4: 4;
-);
-*/
-
-pub trait VertexBuf {
-    type Vertex/*: IntoSimd*/;
-
-    fn index(&self, index: usize) -> Self::Vertex;
-
-    /*
-    fn gather<const LANES: usize>(
-        &self,
-        index: Simd<usize, LANES>,
-    ) -> <Self::Vertex as IntoSimd>::Simd<LANES>
+    fn splat<const LANES: usize>(self) -> Self::Simd<LANES>
     where
         LaneCount<LANES>: SupportedLaneCount,
     {
-        struct ConstFn<'a, T: ?Sized, const LANES: usize>(&'a T, Simd<usize, LANES>)
-        where
-            LaneCount<LANES>: SupportedLaneCount;
-
-        impl<'a, T: VertexBuf + ?Sized, const LANES: usize> vec::detail::ConstFn for ConstFn<'a, T, LANES>
-        where
-            LaneCount<LANES>: SupportedLaneCount,
-        {
-            type Output = T::Vertex;
-
-            #[inline(always)]
-            fn call<const I: usize>(&mut self) -> Self::Output {
-                self.0.index(self.1[I])
-            }
-
-            #[inline(always)]
-            fn call_runtime(&mut self, i: usize) -> Self::Output {
-                self.0.index(self.1[i])
-            }
-        }
-
-        StructureOfArray::from_array(vec::detail::array_from_fn(ConstFn(self, index)))
+        AttributesSimdDefaultImplSimd(self.0.splat())
     }
-    */
+}
+
+impl<S, const LANES: usize> StructureOfArray<LANES>
+    for AttributesSimdDefaultImplSimd<S>
+where
+    S: StructureOfArray<LANES>,
+    S::Structure: Copy,
+    LaneCount<LANES>: SupportedLaneCount,
+{
+    type Structure = AttributesSimdDefaultImpl<S::Structure>;
+
+    fn from_array(array: [Self::Structure; LANES]) -> Self {
+        AttributesSimdDefaultImplSimd(S::from_array(std::array::from_fn(|lane| array[lane].0)))
+    }
+
+    fn index(&self, i: usize) -> Self::Structure {
+        AttributesSimdDefaultImpl(self.0.index(i))
+    }
+}
+
+impl<A, const LANES: usize> AttributesSimd<LANES> for AttributesSimdDefaultImpl<A>
+where
+    A: Attributes + IntoSimd + Copy,
+    LaneCount<LANES>: SupportedLaneCount,
+{
+    fn interpolate(p0: &Self, p1: &Self, p2: &Self, w: Vec3xN<LANES>) -> Self::Simd<LANES> {
+        AttributesSimdDefaultImplSimd::from_array(std::array::from_fn(|lane| {
+            AttributesSimdDefaultImpl(A::interpolate(&p0.0, &p1.0, &p2.0, w.index(lane)))
+        }))
+    }
+}
+
+pub trait VertexBuf {
+    type Vertex;
+
+    fn index(&self, index: usize) -> Self::Vertex;
 
     fn len(&self) -> usize;
 }
@@ -565,7 +330,21 @@ impl<'a, B: VertexBuf + ?Sized> VertexBuf for &'a B {
     }
 }
 
-impl<V:/* IntoSimd +*/ Copy> VertexBuf for [V] {
+impl<V: Copy> VertexBuf for [V] {
+    type Vertex = V;
+
+    #[inline(always)]
+    fn index(&self, index: usize) -> Self::Vertex {
+        self[index]
+    }
+
+    #[inline(always)]
+    fn len(&self) -> usize {
+        self.len()
+    }
+}
+
+impl<V: Copy> VertexBuf for std::vec::Vec<V> {
     type Vertex = V;
 
     #[inline(always)]

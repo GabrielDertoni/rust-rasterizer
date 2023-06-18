@@ -2,11 +2,11 @@ use std::simd::{LaneCount, Mask, Simd, SimdFloat, SimdPartialOrd, SupportedLaneC
 
 use crate::{
     buf,
-    vec::{Mat4x4, Vec, Vec2, Vec3, Vec4, Vec4xN},
-    Attributes, IntoSimd, StructureOfArray, Vertex,
+    vec::{Mat4x4, Vec, Vec2, Vec3, Vec4, Vec4xN, Vec4x4},
+    Attributes, AttributesSimd, IntoSimd, StructureOfArray, Vertex,
 };
 
-#[derive(Clone, Copy, Debug, IntoSimd, Attributes)]
+#[derive(Clone, Copy, Debug, IntoSimd, Attributes, AttributesSimd)]
 pub struct LitAttributes {
     #[position]
     pub position_ndc: Vec4,
@@ -76,29 +76,14 @@ impl<'a> LitFragmentShader<'a> {
     }
 }
 
-impl<'a> crate::FragmentShader<LitAttributes> for LitFragmentShader<'a> {
+impl<'a> crate::FragmentShaderSimd<LitAttributes, 4> for LitFragmentShader<'a> {
     // source: https://learnopengl.com/Advanced-Lighting/Shadows/Shadow-Mapping
-    fn exec<const LANES: usize>(
+    fn exec(
         &self,
-        _mask: Mask<i32, LANES>,
-        _pixel_coords: Vec<Simd<i32, LANES>, 2>,
-        _attrs: LitAttributesSimd<LANES>,
-    ) -> Vec4xN<LANES>
-    where
-        LaneCount<LANES>: SupportedLaneCount,
-    {
-        panic!("unsuported");
-    }
-
-    fn exec_specialized(
-        &self,
-        mask: &mut Mask<i32, 4>,
-        attrs: LitAttributesSimd<4>,
+        mask: Mask<i32, 4>,
         _pixel_coords: Vec<Simd<i32, 4>, 2>,
-        pixels: &mut Simd<u32, 4>,
-    ) {
-        let mask = *mask;
-
+        attrs: LitAttributesSimd<4>,
+    ) -> Vec4x4 {
         let normal = (self.normal_local_to_world.splat() * attrs.normal.to_hom()).xyz();
 
         let bias_unit = 1. / self.shadow_map.width as f32;
@@ -138,28 +123,7 @@ impl<'a> crate::FragmentShader<LitAttributes> for LitFragmentShader<'a> {
             + (diffuse + specular).map_3(|el| lit_mask.select(el, Simd::splat(0.0))))
         .element_mul(texture_color.xyz());
 
-        let out_color = Vec4xN::from([color.x, color.y, color.z, Simd::splat(1.)]);
-
-        let colors = Simd::from(
-            out_color
-                .map(|el| {
-                    u32::from_ne_bytes(
-                        (el.simd_clamp(Simd::splat(0.0), Simd::splat(1.0)) * Simd::splat(255.0))
-                            .cast::<u8>()
-                            .to_array(),
-                    )
-                })
-                .to_array(),
-        );
-
-        // Casting the mask to i8, makes the mask structure have 8x4=32 bits. Since -1 represents true
-        // in the mask, and bits are stored in twos-compliment, that is a bitset with only 1s when true
-        // If we then convert the mask to u32, we'll have a mask for the pixels. We just broadcast this
-        // to every channel and mask the things we want.
-        let mask = mask.cast::<i8>();
-        let mask = Simd::splat(u32::from_ne_bytes(mask.to_int().cast().to_array()));
-
-        *pixels = (colors & mask) + (*pixels & !mask)
+        Vec4xN::from([color.x, color.y, color.z, Simd::splat(1.)])
     }
 }
 
@@ -179,16 +143,16 @@ impl DebugLightIntensity {
     }
 }
 
-impl crate::FragmentShader<LitAttributes> for DebugLightIntensity {
-    fn exec<const LANES: usize>(
+impl<const LANES: usize> crate::FragmentShaderSimd<LitAttributes, LANES> for DebugLightIntensity
+where
+    LaneCount<LANES>: SupportedLaneCount,
+{
+    fn exec(
         &self,
         _mask: Mask<i32, LANES>,
         _pixel_coords: Vec<Simd<i32, LANES>, 2>,
         attrs: LitAttributesSimd<LANES>,
-    ) -> Vec<Simd<f32, LANES>, 4>
-    where
-        LaneCount<LANES>: SupportedLaneCount,
-    {
+    ) -> Vec<Simd<f32, LANES>, 4> {
         let normal = (self.normal_local_to_world.splat() * attrs.normal.to_hom()).xyz();
 
         let light_dir = (self.light_pos.splat() - attrs.frag_position.xyz()).normalized();
@@ -261,7 +225,7 @@ pub mod gouraud {
         }
     }
 
-    #[derive(Clone, Copy, Debug, IntoSimd, Attributes)]
+    #[derive(Clone, Copy, Debug, IntoSimd, Attributes, AttributesSimd)]
     pub struct TexturedAttributes {
         #[position]
         pub position_ndc: Vec4,
@@ -287,31 +251,16 @@ pub mod gouraud {
         }
     }
 
-    impl<'a> crate::FragmentShader<TexturedAttributes> for FragmentShader<'a> {
+    impl<'a> crate::FragmentShaderSimd<TexturedAttributes, 4> for FragmentShader<'a> {
         // source: https://learnopengl.com/Advanced-Lighting/Shadows/Shadow-Mapping
-        fn exec<const LANES: usize>(
+        fn exec(
             &self,
-            _mask: Mask<i32, LANES>,
-            _pixel_coords: Vec<Simd<i32, LANES>, 2>,
-            _attrs: TexturedAttributesSimd<LANES>,
-        ) -> Vec4xN<LANES>
-        where
-            LaneCount<LANES>: SupportedLaneCount,
-        {
-            panic!("unsuported");
-        }
-
-        fn exec_specialized(
-            &self,
-            mask: &mut Mask<i32, 4>,
-            attrs: TexturedAttributesSimd<4>,
+            _mask: Mask<i32, 4>,
             _pixel_coords: Vec<Simd<i32, 4>, 2>,
-            pixels: &mut Simd<u32, 4>,
-        ) {
-            let mask = *mask;
-
-            let bias_unit = 1. / self.shadow_map.width as f32;
-            let bias = 5. * bias_unit;
+            attrs: TexturedAttributesSimd<4>,
+        ) -> Vec4x4 {
+            // let bias_unit = 1. / self.shadow_map.width as f32;
+            // let bias = 5. * bias_unit;
 
             let lit_mask = {
                 /*
@@ -337,29 +286,7 @@ pub mod gouraud {
                     .map_3(|el| lit_mask.select(el, Simd::splat(0.0)));
             let color = light_intensity.element_mul(texture_color.xyz());
 
-            let out_color = Vec4xN::from([color.x, color.y, color.z, Simd::splat(1.)]);
-
-            let colors = Simd::from(
-                out_color
-                    .map(|el| {
-                        u32::from_ne_bytes(
-                            (el.simd_clamp(Simd::splat(0.0), Simd::splat(1.0))
-                                * Simd::splat(255.0))
-                            .cast::<u8>()
-                            .to_array(),
-                        )
-                    })
-                    .to_array(),
-            );
-
-            // Casting the mask to i8, makes the mask structure have 8x4=32 bits. Since -1 represents true
-            // in the mask, and bits are stored in twos-compliment, that is a bitset with only 1s when true
-            // If we then convert the mask to u32, we'll have a mask for the pixels. We just broadcast this
-            // to every channel and mask the things we want.
-            let mask = mask.cast::<i8>();
-            let mask = Simd::splat(u32::from_ne_bytes(mask.to_int().cast().to_array()));
-
-            *pixels = (colors & mask) + (*pixels & !mask)
+            Vec4xN::from([color.x, color.y, color.z, Simd::splat(1.)])
         }
     }
 }

@@ -1,7 +1,38 @@
 use crate::{
-    VertexShader, IntoSimd, Attributes,
-    vec::{Vec, Vec2i, Vec2, Vec3, Vec4},
+    VertexShader, Attributes,
+    vec::{Vec, Vec2i, Vec2, Vec3, Vec4}, pipeline::Metrics,
 };
+
+
+macro_rules! count_cycles {
+    (
+        #[counter($counter:expr $(, increment = $increment:expr)?)]
+        $($code:tt)*
+    ) => {
+        {
+            #[cfg(feature = "performance-counters")]
+            let start = unsafe { core::arch::x86_64::_rdtsc() };
+
+            let res = {
+                $($code)*
+            };
+
+            #[cfg(feature = "performance-counters")]
+            let cycles = unsafe { core::arch::x86_64::_rdtsc() - start };
+
+            #[cfg(feature = "performance-counters")]
+            {
+                $counter.cycles += cycles;
+                $($counter.hits += $increment - 1;)?
+                $counter.hits += 1;
+            }
+
+            res
+        }
+    };
+}
+
+pub(crate) use count_cycles;
 
 #[derive(Clone, Copy, Debug)]
 pub struct BBox<T> {
@@ -21,7 +52,7 @@ impl<T: Num> BBox<T> {
 }
 */
 
-pub(super) fn ndc_to_screen(ndc: Vec2, width: f32, height: f32) -> Vec2 {
+pub fn ndc_to_screen(ndc: Vec2, width: f32, height: f32) -> Vec2 {
     Vec2::from([
         ndc.x * width / 2. + width / 2.,
         -ndc.y * height / 2. + height / 2.,
@@ -43,7 +74,7 @@ pub(super) fn ndc_to_screen(ndc: Vec2, width: f32, height: f32) -> Vec2 {
 /// - `W.z = orient_2d(C, A, P) / orient_2d(A, B, C)`
 ///
 /// It's also worth noting that `orient_2d(A, B, C)` is twice the area of the triangle ABC.
-pub(super) fn orient_2d<T: crate::vec::Num>(from: Vec<T, 2>, to: Vec<T, 2>, p: Vec<T, 2>) -> T {
+pub fn orient_2d<T: crate::vec::Num>(from: Vec<T, 2>, to: Vec<T, 2>, p: Vec<T, 2>) -> T {
     let u = to - from;
     let v = p - from;
     u.x * v.y - u.y * v.x
@@ -51,7 +82,7 @@ pub(super) fn orient_2d<T: crate::vec::Num>(from: Vec<T, 2>, to: Vec<T, 2>, p: V
 
 // source: https://www.cs.utexas.edu/~fussell/courses/cs354-fall2015/lectures/lecture9.pdf
 // This assumes that if all points are outside the frustum, than so is the triangle
-pub(super) fn is_inside_frustum_clip(p0_clip: Vec4, p1_clip: Vec4, p2_clip: Vec4) -> bool {
+pub fn is_inside_frustum_clip(p0_clip: Vec4, p1_clip: Vec4, p2_clip: Vec4) -> bool {
     let range0 = -p0_clip.w..p0_clip.w;
     let range1 = -p1_clip.w..p1_clip.w;
     let range2 = -p2_clip.w..p2_clip.w;
@@ -65,7 +96,7 @@ pub(super) fn is_inside_frustum_clip(p0_clip: Vec4, p1_clip: Vec4, p2_clip: Vec4
             && range2.contains(&p2_clip.z))
 }
 
-pub(super) fn is_inside_frustum_screen(
+pub fn is_inside_frustum_screen(
     p0_screen: Vec2i,
     p1_screen: Vec2i,
     p2_screen: Vec2i,
@@ -86,7 +117,7 @@ pub(super) fn is_inside_frustum_screen(
             && (-1.0..1.0).contains(&z2))
 }
 
-pub(super) fn is_inside_frustum(p0_ndc: Vec3, p1_ndc: Vec3, p2_ndc: Vec3) -> bool {
+pub fn is_inside_frustum(p0_ndc: Vec3, p1_ndc: Vec3, p2_ndc: Vec3) -> bool {
     ((-1.0..1.0).contains(&p0_ndc.x)
         && (-1.0..1.0).contains(&p0_ndc.y)
         && (-1.0..1.0).contains(&p0_ndc.z))
@@ -98,14 +129,31 @@ pub(super) fn is_inside_frustum(p0_ndc: Vec3, p1_ndc: Vec3, p2_ndc: Vec3) -> boo
             && (-1.0..1.0).contains(&p2_ndc.z))
 }
 
-pub(crate) fn process_vertex<Vert, V>(v: Vert, vert_shader: &V) -> V::Output
+pub fn process_vertex<Vert, V>(v: Vert, vert_shader: &V, metrics: &mut Metrics) -> V::Output
 where
     V: VertexShader<Vert>,
 {
-    let mut out = vert_shader.exec(v);
-    let pos = out.position_mut();
-    let inv_w = 1. / pos.w;
-    *pos.xyz_mut() *= inv_w;
-    pos.w = inv_w;
-    out
+    count_cycles! {
+        #[counter(metrics.performance_counters.single_vertex)]
+
+        let mut out = vert_shader.exec(v);
+        let pos = out.position_mut();
+        let inv_w = 1. / pos.w;
+        *pos.xyz_mut() *= inv_w;
+        pos.w = inv_w;
+        out
+    }
+}
+
+#[inline(always)]
+pub fn orient_2d_step(
+    from: Vec2i,
+    to: Vec2i,
+    p: Vec2i,
+) -> (Vec2i, i32) {
+    let u = to - from;
+    let c = u.y * from.x - u.x * from.y;
+    let w = u.x * p.y - u.y * p.x + c;
+    let inc = Vec2i::from([-u.y, u.x]);
+    (inc, w)
 }

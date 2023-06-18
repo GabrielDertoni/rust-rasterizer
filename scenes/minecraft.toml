@@ -14,7 +14,9 @@ speed = 5.0
 width = 1280
 height = 720
 near = 0.1
-far = 100
+far = 50
+alpha-clip = 0.1
+cull-mode = "back-face"
 
 [rasterizer]
 implementation = "bbox-simd"

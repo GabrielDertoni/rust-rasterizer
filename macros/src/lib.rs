@@ -168,7 +168,7 @@ pub fn attributes_derive(input: proc_macro::TokenStream) -> proc_macro::TokenStr
 
     let ident = input.ident;
 
-    let (position_field, interpolate, interpolate_basic) = match structure.fields {
+    let (position_field, interpolate) = match structure.fields {
         Fields::Named(fields) => {
             let mut it = fields.named.iter();
             let find_closure = |field: &&Field| -> bool {
@@ -196,19 +196,13 @@ pub fn attributes_derive(input: proc_macro::TokenStream) -> proc_macro::TokenStr
             let field_names = fields.named.iter().map(|field| &field.ident);
             let field_names2 = field_names.clone();
 
-            let interpolate = quote! {
-                Self::Simd {
-                    #(#field_names: w.x * p0.#field_names.splat() + w.y * p1.#field_names.splat() + w.z * p2.#field_names.splat()),*
-                }
-            };
-
             let interpolate_basic = quote! {
                 Self {
                     #(#field_names2: w.x * p0.#field_names2 + w.y * p1.#field_names2 + w.z * p2.#field_names2),*
                 }
             };
 
-            (position_field.ident.clone(), interpolate, interpolate_basic)
+            (position_field.ident.clone(), interpolate_basic)
         }
         Fields::Unnamed(_) => todo!(),
         Fields::Unit => todo!(),
@@ -216,21 +210,8 @@ pub fn attributes_derive(input: proc_macro::TokenStream) -> proc_macro::TokenStr
 
     quote! {
         impl Attributes for #ident {
-            #[inline]
-            fn interpolate<const LANES: usize>(
-                p0: &Self,
-                p1: &Self,
-                p2: &Self,
-                w: Vec<Simd<f32, LANES>, 3>,
-            ) -> Self::Simd<LANES>
-            where
-                LaneCount<LANES>: SupportedLaneCount,
-            {
+            fn interpolate(p0: &Self, p1: &Self, p2: &Self, w: Vec<f32, 3>) -> Self {
                 #interpolate
-            }
-            
-            fn interpolate_basic(p0: &Self, p1: &Self, p2: &Self, w: Vec<f32, 3>) -> Self {
-                #interpolate_basic
             }
 
             #[inline(always)]
@@ -241,6 +222,58 @@ pub fn attributes_derive(input: proc_macro::TokenStream) -> proc_macro::TokenStr
             #[inline(always)]
             fn position_mut(&mut self) -> &mut Vec4 {
                 &mut self.#position_field
+            }
+        }
+    }
+    .into()
+}
+
+#[proc_macro_derive(AttributesSimd)]
+pub fn attributes_derive_simd(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+
+    if input.generics.lt_token.is_some() || input.generics.where_clause.is_some() {
+        return quote!(compile_error!(
+            "generics and where clauses are note supported"
+        ))
+        .into();
+    }
+
+    let Data::Struct(structure) = input.data else {
+        return quote!(compile_error!("only structs are supported")).into();
+    };
+
+    let ident = input.ident;
+
+    let interpolate = match structure.fields {
+        Fields::Named(fields) => {
+            let field_names = fields.named.iter().map(|field| &field.ident);
+
+            let interpolate = quote! {
+                Self::Simd {
+                    #(#field_names: w.x * p0.#field_names.splat() + w.y * p1.#field_names.splat() + w.z * p2.#field_names.splat()),*
+                }
+            };
+
+            interpolate
+        }
+        Fields::Unnamed(_) => todo!(),
+        Fields::Unit => todo!(),
+    };
+
+    quote! {
+        impl<const LANES: usize> AttributesSimd<LANES> for #ident
+        where
+            std::simd::LaneCount<LANES>: std::simd::SupportedLaneCount,
+        {
+            #[inline]
+            fn interpolate(
+                p0: &Self,
+                p1: &Self,
+                p2: &Self,
+                w: Vec<std::simd::Simd<f32, LANES>, 3>,
+            ) -> Self::Simd<LANES> {
+                #interpolate
             }
         }
     }

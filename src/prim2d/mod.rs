@@ -1,13 +1,11 @@
-pub(crate) mod simd;
-// pub(crate) mod scanline;
-// pub(crate) mod specialized;
+pub mod simd;
 
 use crate::{
-    Attributes, FragmentShader,
-    vec::{Vec, Vec2i, Vec3, Vec4},
+    common::*,
     pipeline::Metrics,
     texture::BorrowedMutTexture,
-    common::*, config::CullingMode,
+    vec::{Vec, Vec2i, Vec4},
+    Attributes, FragmentShader,
 };
 
 pub fn draw_triangles<Attr, S>(
@@ -15,12 +13,8 @@ pub fn draw_triangles<Attr, S>(
     tris: &[[usize; 3]],
     frag_shader: &S,
     mut pixels: BorrowedMutTexture<[u8; 4]>,
-    mut depth_buf: Option<BorrowedMutTexture<f32>>,
-    culling: CullingMode,
-    alpha_clip: Option<f32>,
     metrics: &mut Metrics,
-)
-where
+) where
     Attr: Attributes + Copy,
     S: FragmentShader<Attr>,
 {
@@ -32,16 +26,16 @@ where
     };
 
     for &[v0, v1, v2] in tris {
-        let (v0, v1, v2) = match culling {
-            CullingMode::FrontFace => (v0, v1, v2),
-            CullingMode::BackFace => (v2, v1, v0),
-            CullingMode::Disabled => {
-                let sign = orient_2d(attributes[v0].position().xy(), attributes[v1].position().xy(), attributes[v2].position().xy());
-                if sign > 0.0 {
-                    (v2, v1, v0)
-                } else {
-                    (v0, v1, v2)
-                }
+        let (v0, v1, v2) = {
+            let sign = orient_2d(
+                attributes[v0].position().xy(),
+                attributes[v1].position().xy(),
+                attributes[v2].position().xy(),
+            );
+            if sign > 0.0 {
+                (v2, v1, v0)
+            } else {
+                (v0, v1, v2)
             }
         };
 
@@ -51,8 +45,6 @@ where
             attributes[v2],
             frag_shader,
             pixels.borrow_mut(),
-            depth_buf.as_mut().map(|depth_buf| depth_buf.borrow_mut()),
-            alpha_clip,
             bbox,
             &mut *metrics,
         );
@@ -70,8 +62,6 @@ fn draw_triangle<Attr, F>(
     v2: Attr,
     frag_shader: &F,
     mut pixels: BorrowedMutTexture<[u8; 4]>,
-    mut depth_buf: Option<BorrowedMutTexture<f32>>,
-    alpha_clip: Option<f32>,
     aabb: BBox<i32>,
     metrics: &mut Metrics,
 ) where
@@ -138,33 +128,20 @@ fn draw_triangle<Attr, F>(
 
                         let idx = (x as usize, y as usize);
                         let w = Vec::from([w0, w1, w2]).to_f32() * inv_area;
-        
-                        let mut w_persp = w.element_mul(Vec3::from([p0_ndc.w, p1_ndc.w, p2_ndc.w]));
-                        w_persp /= w_persp.x + w_persp.y + w_persp.z;
-        
-                        let z = w.dot(Vec::from([p0_ndc.z, p1_ndc.z, p2_ndc.z]));
-                        let depth_check = depth_buf.as_ref().map(|depth_buf| z < depth_buf[idx]).unwrap_or(true);
 
-                        if depth_check {
-                            let interp = Attributes::interpolate(&v0, &v1, &v2, w_persp);
-        
-                            let prev_color = Vec::from(pixels[idx]).to_f32() / 255.;
-                            
-                            let prev_color_linear = prev_color.xyz().map(|chan| chan * chan);
-                            let color_linear = frag_shader.exec(Vec2i::from([x, y]), interp);
-                            let alpha = color_linear.w;
-                            let blended_linear = prev_color_linear * (1. - alpha) + color_linear.xyz() * alpha;
-        
-                            let blended_srgb = blended_linear.map(|chan| chan.sqrt());
-        
-                            let final_color = Vec4::from([blended_srgb.x, blended_srgb.y, blended_srgb.z, 1.]).map(|chan| (chan.clamp(0., 1.) * 255.) as u8);
-                            pixels[idx] = final_color.to_array();
-                            if alpha_clip.map(|alpha_clip| alpha > alpha_clip).unwrap_or(true) {
-                                if let Some(depth_buf) = &mut depth_buf {
-                                    depth_buf[idx] = z;
-                                }
-                            }
-                        }
+                        let interp = Attributes::interpolate(&v0, &v1, &v2, w);
+
+                        let prev_color = Vec::from(pixels[idx]).to_f32() / 255.;
+
+                        let prev_color_linear = prev_color.xyz().map(|chan| chan * chan);
+                        let color_linear = frag_shader.exec(Vec2i::from([x, y]), interp);
+                        let alpha = color_linear.w;
+                        let blended_linear = prev_color_linear * (1. - alpha) + color_linear.xyz() * alpha;
+
+                        let blended_srgb = blended_linear.map(|chan| chan.sqrt());
+
+                        let final_color = Vec4::from([blended_srgb.x, blended_srgb.y, blended_srgb.z, 1.]).map(|chan| (chan.clamp(0., 1.) * 255.) as u8);
+                        pixels[idx] = final_color.to_array();
                     }
                 }
             }

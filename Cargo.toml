@@ -6,6 +6,10 @@ edition = "2021"
 [workspace]
 members = ["macros", "raster-egui"]
 
+[features]
+default = []
+performance-counters = []
+
 [dependencies]
 anyhow = "1.0.71"
 bumpalo = { version = "3.13.0", features = ["collections"] }

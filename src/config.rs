@@ -136,6 +136,10 @@ pub struct RenderingConfig {
     pub near: f32,
     #[serde(default = "RenderingConfig::far_default")]
     pub far: f32,
+    #[serde(default, rename = "alpha-clip")]
+    pub alpha_clip: Option<f32>,
+    #[serde(default, rename = "cull-mode")]
+    pub culling_mode: CullingMode,
 }
 
 impl RenderingConfig {
@@ -146,6 +150,17 @@ impl RenderingConfig {
     fn far_default() -> f32 {
         100.
     }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
+pub enum CullingMode {
+    #[serde(rename = "front-face")]
+    FrontFace,
+    #[serde(rename = "back-face")]
+    BackFace,
+    #[serde(rename = "disabled")]
+    #[default]
+    Disabled,
 }
 
 #[derive(Clone, Copy, Default, Deserialize)]
