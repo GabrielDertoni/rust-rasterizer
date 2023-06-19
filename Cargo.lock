@@ -1709,6 +1709,7 @@ dependencies = [
  "macros",
  "notify",
  "pixels",
+ "rayon",
  "serde",
  "toml",
  "winit",

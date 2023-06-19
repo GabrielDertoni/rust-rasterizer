@@ -1,7 +1,7 @@
 use std::{
     marker::PhantomData,
     ops::{Bound, Index, IndexMut, Range, RangeBounds},
-    simd::{LaneCount, Mask, Simd, SupportedLaneCount, SimdFloat, SimdConstPtr},
+    simd::{LaneCount, Mask, Simd, SimdConstPtr, SimdFloat, SupportedLaneCount},
 };
 
 pub use index_layout::*;
@@ -9,7 +9,7 @@ pub use storage::*;
 
 use crate::{
     math_utils::{simd_clamp01, simd_wrap01},
-    vec::{Vec, Vec2, Vec4xN, Vec2xN},
+    vec::{Vec, Vec2, Vec2xN, Vec4xN},
 };
 
 pub struct Texture<T, S, I = RowMajor, Width: Dim = SomeNat, Height: Dim = SomeNat> {
@@ -158,6 +158,44 @@ where
     }
 }
 
+impl<'a, T, I, Width, Height> Clone for Texture<T, BorrowedStorage<'a, T>, I, Width, Height>
+where
+    I: IndexLayout,
+    Width: Dim,
+    Height: Dim,
+{
+    fn clone(&self) -> Self {
+        Self {
+            width: self.width.clone(),
+            height: self.height.clone(),
+            storage: BorrowedStorage {
+                ptr: self.storage.ptr,
+                _marker: PhantomData,
+            },
+            indexer: self.indexer.clone(),
+            _marker: self._marker.clone(),
+        }
+    }
+}
+
+unsafe impl<T, S, I, Width, Height> Sync for Texture<T, S, I, Width, Height>
+where
+    S: Storage<Elem = T>,
+    I: IndexLayout,
+    Width: Dim,
+    Height: Dim,
+{
+}
+
+unsafe impl<T, S, I, Width, Height> Send for Texture<T, S, I, Width, Height>
+where
+    S: Storage<Elem = T>,
+    I: IndexLayout,
+    Width: Dim,
+    Height: Dim,
+{
+}
+
 pub enum TextureWrap {
     Clamp,
     Repeat,
@@ -183,7 +221,7 @@ where
         &self,
         uv: Vec2xN<LANES>,
         mask: Mask<i32, LANES>,
-        wrap: TextureWrap
+        wrap: TextureWrap,
     ) -> Vec4xN<LANES>
     where
         LaneCount<LANES>: SupportedLaneCount,
@@ -201,32 +239,31 @@ where
         let x = u * Simd::splat((self.width() - 1) as f32);
         let y = (Simd::splat(1.) - v) * Simd::splat((self.height() - 1) as f32);
 
-        
         let values = unsafe {
             // SAFETY: We either clamp or wrap the value, which already means it can't be `inf` or `-inf`. We also assert that no lanes are
             // `NaN`. Thus we meet all the preconditions to call `to_int_unchecked()`.
             let x = x.to_int_unchecked();
             let y = y.to_int_unchecked();
-    
+
             // TODO: Only allow construction of textures whose indicies fit into an `i32`
             let idxs = self.indexer.get_index_simd_i32(x, y);
 
             let u32_pixels = self.storage.ptr().cast::<u32>();
-            
+
             // SAFETY: Skip bounds checking, since we know values can only be as high as `(width - 1) * (height - 1)`.
             Simd::<u32, LANES>::gather_select_ptr(
                 Simd::splat(u32_pixels).wrapping_add(idxs.cast()),
                 mask.cast(),
-                Simd::splat(0)
+                Simd::splat(0),
             )
         };
 
         let ff_mask = Simd::splat(0xff);
         Vec::from([
-            ((values >> Simd::splat(24)) & ff_mask).cast(),
-            ((values >> Simd::splat(16)) & ff_mask).cast(),
-            ((values >> Simd::splat(8)) & ff_mask).cast(),
             (values & ff_mask).cast(),
+            ((values >> Simd::splat(8)) & ff_mask).cast(),
+            ((values >> Simd::splat(16)) & ff_mask).cast(),
+            ((values >> Simd::splat(24)) & ff_mask).cast(),
         ]) / Simd::splat(255.)
     }
 }
@@ -256,6 +293,61 @@ where
         let ret = unsafe { std::mem::transmute_copy(&self) };
         std::mem::forget(self);
         ret
+    }
+}
+
+// TODO: Generalize
+impl<'a, T> Texture<T, BorrowedMutStorage<'a, T>, RowMajor, SomeNat, SomeNat> {
+    pub fn split_mut_vert(&mut self, idx: usize) -> (Self, Self) {
+        assert!(idx < self.width());
+        (
+            Texture {
+                width: SomeNat::from_usize(idx),
+                height: SomeNat::from_usize(self.height()),
+                storage: BorrowedMutStorage {
+                    ptr: self.storage.ptr_mut(),
+                    _marker: PhantomData,
+                },
+                indexer: RowMajor { stride: self.indexer.stride },
+                _marker: PhantomData,
+            },
+            Texture {
+                width: SomeNat::from_usize(self.width() - idx),
+                height: SomeNat::from_usize(self.height()),
+                storage: BorrowedMutStorage {
+                    ptr: unsafe { self.storage.ptr_mut().add(idx) },
+                    _marker: PhantomData,
+                },
+                indexer: RowMajor { stride: self.indexer.stride },
+                _marker: PhantomData,
+            },
+        )
+    }
+
+    pub fn split_mut_horz(&mut self, idx: usize) -> (Self, Self) {
+        assert!(idx < self.height());
+        (
+            Texture {
+                width: SomeNat::from_usize(self.width()),
+                height: SomeNat::from_usize(idx),
+                storage: BorrowedMutStorage {
+                    ptr: self.storage.ptr_mut(),
+                    _marker: PhantomData,
+                },
+                indexer: RowMajor { stride: self.indexer.stride },
+                _marker: PhantomData,
+            },
+            Texture {
+                width: SomeNat::from_usize(self.width()),
+                height: SomeNat::from_usize(self.height() - idx),
+                storage: BorrowedMutStorage {
+                    ptr: unsafe { self.storage.ptr_mut().add(idx * self.indexer.stride()) },
+                    _marker: PhantomData,
+                },
+                indexer: RowMajor { stride: self.indexer.stride },
+                _marker: PhantomData,
+            },
+        )
     }
 }
 
@@ -650,7 +742,10 @@ pub mod index_layout {
     impl<StrideExp: Dim> IndexLayout for RowMajorPowerOf2<StrideExp> {
         #[track_caller]
         fn from_size(width: usize, _height: usize) -> Self {
-            assert!(width.is_power_of_two(), "expected width to be a power of two, but instead is {width}");
+            assert!(
+                width.is_power_of_two(),
+                "expected width to be a power of two, but instead is {width}"
+            );
             RowMajorPowerOf2 {
                 stride_exponent: StrideExp::from_usize(width.ilog2() as usize),
             }

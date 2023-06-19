@@ -4,6 +4,8 @@ use std::ops::{
 };
 use std::simd::{LaneCount, Simd, SimdElement, SimdFloat, SimdOrd, StdFloat, SupportedLaneCount};
 
+use serde::de::value;
+
 use crate::{IntoSimd, StructureOfArray};
 
 pub type Mat3x3 = Mat<f32, 3, 3>;
@@ -117,13 +119,13 @@ impl<T: Copy, const M: usize, const N: usize> Mat<T, M, N> {
     }
 }
 
-impl<T: Copy + Ord, const M: usize, const N: usize> Mat<T, M, N> {
+impl<T: Copy + Num, const M: usize, const N: usize> Mat<T, M, N> {
     pub fn min(self, rhs: Self) -> Self {
-        self.zip_with(rhs, |lhs, rhs| std::cmp::min(lhs, rhs))
+        self.zip_with(rhs, |lhs, rhs| Num::min(lhs, rhs))
     }
 
     pub fn max(self, rhs: Self) -> Self {
-        self.zip_with(rhs, |lhs, rhs| std::cmp::max(lhs, rhs))
+        self.zip_with(rhs, |lhs, rhs| Num::max(lhs, rhs))
     }
 }
 
@@ -761,6 +763,12 @@ impl<T, const N: usize> From<[T; N]> for Vec<T, N> {
         Mat {
             rows: unsafe { std::mem::transmute_copy::<[T; N], [[T; 1]; N]>(&value) },
         }
+    }
+}
+
+impl<T: Copy> From<(Vec<T, 3>, T)> for Vec<T, 4> {
+    fn from((v, value): (Vec<T, 3>, T)) -> Self {
+        Vec::from([v.x, v.y, v.z, value])
     }
 }
 

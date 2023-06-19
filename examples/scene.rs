@@ -20,7 +20,7 @@ use rasterization::{
     utils::{FpvCamera, FpsCounter},
     vec::Vec3,
     texture::OwnedTexture,
-    vert_buf::{VertBuf, self}, VertexBuf,
+    vert_buf::VertBuf, VertexBuf,
     config::{Light, Scene, RenderingConfig, RasterizerConfig, RasterizerImplementation},
     pipeline::PipelineMode,
     FragmentShaderSimd,
@@ -251,7 +251,7 @@ impl World {
                 );
                 let frag_shader = shaders::textured::TexturedFragmentShader::new(texture);
     
-                pipeline.draw(subset.range.clone(), FragmentShaderSimd::<_, 8>::simd_impl(&frag_shader));
+                pipeline.draw_threaded(subset.range.clone(), FragmentShaderSimd::<_, 8>::simd_impl(&frag_shader));
             }
         }
         println!("time to render models: {:?}", start.elapsed());

@@ -1,10 +1,17 @@
-use std::ops::Range;
 use std::simd::Simd;
+use std::sync::Arc;
+use std::{ops::Range, thread::JoinHandle};
+
+use rayon::prelude::*;
 
 use crate::{
-    config::CullingMode, simd_config::{LANES, SimdColorGamma, SimdPixels}, texture::BorrowedMutTexture, vert_buf::VertBuf,
+    common::{count_cycles, BBox},
+    config::CullingMode,
+    simd_config::{SimdColorGamma, SimdPixels, LANES},
+    texture::BorrowedMutTexture,
+    vert_buf::VertBuf,
     Attributes, AttributesSimd, FragmentShader, FragmentShaderImpl, FragmentShaderSimd, VertexBuf,
-    VertexShader, common::count_cycles,
+    VertexShader,
 };
 
 macro_rules! static_assert_eq {
@@ -41,7 +48,8 @@ pub struct Pipeline<'a, B = &'a VertBuf> {
     mode: PipelineMode,
     metrics: Metrics,
     culling_mode: CullingMode,
-    alpha_clip: Option<f32>
+    alpha_clip: Option<f32>,
+    workers: Vec<JoinHandle<()>>,
 }
 
 impl<'a, B> Pipeline<'a, B>
@@ -58,6 +66,7 @@ where
             metrics: Metrics::new(),
             culling_mode: CullingMode::BackFace,
             alpha_clip: None,
+            workers: Vec::new(),
         }
     }
 
@@ -104,10 +113,10 @@ where
                 let ff_mask = Simd::splat(0xff);
                 let values = Simd::from(pixels.map(u32::from_ne_bytes));
                 let v = SimdColorGamma::from([
-                    ((values >> Simd::splat(24)) & ff_mask).cast::<u8>(),
-                    ((values >> Simd::splat(16)) & ff_mask).cast::<u8>(),
-                    ((values >> Simd::splat(8)) & ff_mask).cast::<u8>(),
                     (values & ff_mask).cast::<u8>(),
+                    ((values >> Simd::splat(8)) & ff_mask).cast::<u8>(),
+                    ((values >> Simd::splat(16)) & ff_mask).cast::<u8>(),
+                    ((values >> Simd::splat(24)) & ff_mask).cast::<u8>(),
                 ]);
                 assert_eq!(std::mem::size_of_val(pixels), std::mem::size_of_val(&v));
                 unsafe {
@@ -117,7 +126,6 @@ where
             }
         }
         self.color_buf.replace(color_buf);
-
     }
 
     pub fn take_color_buffer(&mut self) -> Option<BorrowedMutTexture<'a, [u8; 4]>> {
@@ -131,10 +139,10 @@ where
             };
             for color in simd_color_buf {
                 let values = Vec::from(*color).map(|el| Simd::from(el).cast::<u32>());
-                let v = (values.x << Simd::splat(24))
-                | (values.y << Simd::splat(16))
-                | (values.z << Simd::splat(8))
-                | values.w;
+                let v = values.x
+                    | (values.y << Simd::splat(8))
+                    | (values.z << Simd::splat(16))
+                    | (values.w << Simd::splat(24));
 
                 assert_eq!(std::mem::size_of_val(color), std::mem::size_of_val(&v));
                 unsafe {
@@ -215,6 +223,7 @@ where
     Attr: Attributes + AttributesSimd<LANES> + Copy,
     B: VertexBuf,
 {
+    /*
     pub fn draw<Scalar, Simd>(
         &mut self,
         range: Range<usize>,
@@ -261,6 +270,7 @@ where
                     .borrow_mut();
 
                 let color_buf = unsafe { color_buf.cast::<u32>() };
+
                 draw_triangles(
                     &self.attributes,
                     &self.pipeline.index_buf[range],
@@ -299,6 +309,245 @@ where
             }
         }
     }
+    */
+
+    pub fn draw_threaded<Scalar, Simd>(
+        &mut self,
+        range: Range<usize>,
+        frag_shader: FragmentShaderImpl<Scalar, Simd>,
+    ) where
+        Scalar: FragmentShader<Attr> + Sync,
+        Simd: FragmentShaderSimd<Attr, LANES> + Sync,
+        Attr: Sync,
+    {
+        let color_buf = self
+            .pipeline
+            .color_buf
+            .as_mut()
+            .expect("no color buffer")
+            .borrow_mut();
+
+        match self.pipeline.mode {
+            PipelineMode::Basic3D => {
+                use crate::prim3d::draw_triangles;
+                let depth_buf = self
+                    .pipeline
+                    .depth_buf
+                    .as_mut()
+                    .map(|depth_buf| depth_buf.borrow_mut());
+
+                draw_triangles(
+                    &self.attributes,
+                    &self.pipeline.index_buf[range],
+                    frag_shader.unwrap_scalar(),
+                    color_buf,
+                    depth_buf,
+                    self.pipeline.culling_mode,
+                    self.pipeline.alpha_clip,
+                    &mut self.pipeline.metrics,
+                );
+            }
+
+            PipelineMode::Simd3D => {
+                use crate::prim3d::simd::draw_triangles;
+                let mut depth_buf = self
+                    .pipeline
+                    .depth_buf
+                    .as_mut()
+                    .expect("no depth buffer")
+                    .borrow_mut();
+
+                let mut color_buf = unsafe { color_buf.cast::<u32>() };
+
+                let bboxes: Arc<[BBox<f32>]> = vec![
+                    BBox {
+                        x: -1.,
+                        y: 1.,
+                        width: 2.,
+                        height: 2. / 3.,
+                    },
+                    BBox {
+                        x: 0.,
+                        y: 1.,
+                        width: 1.,
+                        height: 2. / 3.,
+                    },
+                    BBox {
+                        x: -1.,
+                        y: 1. - 2. / 3.,
+                        width: 2.,
+                        height: 2. / 3.,
+                    },
+                    BBox {
+                        x: 0.,
+                        y: 1. - 2. / 3.,
+                        width: 1.,
+                        height: 2. / 3.,
+                    },
+                    BBox {
+                        x: -1.,
+                        y: 1. - 4. / 3.,
+                        width: 2.,
+                        height: 2. / 3.,
+                    },
+                    BBox {
+                        x: 0.,
+                        y: 1. - 4. / 3.,
+                        width: 1.,
+                        height: 2. / 3.,
+                    },
+                ]
+                .into();
+                let n_tiles = bboxes.len();
+                let n_threads = std::thread::available_parallelism().unwrap().get();
+
+                let tile_init = || -> Vec<Vec<Vec<[usize; 3]>>> {
+                    (0..n_tiles)
+                        .map(|_| Vec::with_capacity(n_threads))
+                        .collect::<Vec<_>>()
+                };
+
+                let start = std::time::Instant::now();
+                let mut bins = self.pipeline.index_buf[range.clone()]
+                    .as_parallel_slice()
+                    .par_chunks((range.end - range.start) / n_threads)
+                    .map(|indices| bin_triangles(Arc::clone(&bboxes), &self.attributes, indices))
+                    .fold(tile_init, |mut acc, el| {
+                        for (acc, el) in acc.iter_mut().zip(el) {
+                            acc.push(el);
+                        }
+                        acc
+                    })
+                    .reduce(tile_init, |mut lhs, mut rhs| {
+                        for (lhs, rhs) in lhs.iter_mut().zip(rhs.iter_mut()) {
+                            lhs.append(rhs);
+                        }
+                        lhs
+                    });
+
+                println!("binning time: {:?}", start.elapsed());
+
+                let (mut cleft, mut cright) = color_buf.split_mut_vert(1280 / 2);
+
+                let (ctopleft, mut cmidleft) = cleft.split_mut_horz(720 / 3);
+                let (cmidleft, cbotleft) = cmidleft.split_mut_horz(720 / 3);
+
+                let (ctopright, mut cmidright) = cright.split_mut_horz(720 / 3);
+                let (cmidright, cbotright) = cmidright.split_mut_horz(720 / 3);
+
+                let (mut dleft, mut dright) = depth_buf.split_mut_vert(1280 / 2);
+
+                let (dtopleft, mut dmidleft) = dleft.split_mut_horz(720 / 3);
+                let (dmidleft, dbotleft) = dmidleft.split_mut_horz(720 / 3);
+
+                let (dtopright, mut dmidright) = dright.split_mut_horz(720 / 3);
+                let (dmidright, dbotright) = dmidright.split_mut_horz(720 / 3);
+
+                let tiles = vec![
+                    Tile {
+                        bbox: bboxes[0],
+                        color_buf: ctopleft,
+                        depth_buf: dtopleft,
+                        bins: std::mem::take(&mut bins[0]),
+                    },
+                    Tile {
+                        bbox: bboxes[1],
+                        color_buf: ctopright,
+                        depth_buf: dtopright,
+                        bins: std::mem::take(&mut bins[1]),
+                    },
+                    Tile {
+                        bbox: bboxes[2],
+                        color_buf: cmidleft,
+                        depth_buf: dmidleft,
+                        bins: std::mem::take(&mut bins[2]),
+                    },
+                    Tile {
+                        bbox: bboxes[3],
+                        color_buf: cmidright,
+                        depth_buf: dmidright,
+                        bins: std::mem::take(&mut bins[3]),
+                    },
+                    Tile {
+                        bbox: bboxes[4],
+                        color_buf: cbotleft,
+                        depth_buf: dbotleft,
+                        bins: std::mem::take(&mut bins[4]),
+                    },
+                    Tile {
+                        bbox: bboxes[5],
+                        color_buf: cbotright,
+                        depth_buf: dbotright,
+                        bins: std::mem::take(&mut bins[5]),
+                    },
+                ];
+
+                let width = 1280;
+                let height = 720;
+
+                let frag_shader = frag_shader.unwrap_simd();
+                let metrics = tiles
+                    .into_par_iter()
+                    .map(|mut tile| {
+                        let mut metrics = Metrics::new();
+                        for bin in &tile.bins {
+                            draw_triangles(
+                                &self.attributes,
+                                &bin,
+                                frag_shader,
+                                tile.color_buf.borrow_mut(),
+                                tile.depth_buf.borrow_mut(),
+                                width,
+                                height,
+                                BBox {
+                                    x: (tile.bbox.x * width as f32 / 2. + width as f32 / 2.) as i32,
+                                    y: (-tile.bbox.y * height as f32 / 2. + height as f32 / 2.) as i32,
+                                    width: (tile.bbox.width * width as f32 / 2.) as i32,
+                                    height: (tile.bbox.height * height as f32 / 2.) as i32,
+                                },
+                                self.pipeline.culling_mode,
+                                self.pipeline.alpha_clip,
+                                &mut metrics,
+                            );
+                        }
+                        metrics
+                    })
+                    .reduce(
+                        || Metrics::new(),
+                        |mut lhs, rhs| {
+                            lhs.merge(rhs);
+                            lhs
+                        },
+                    );
+                self.pipeline.metrics.merge(metrics);
+            }
+
+            PipelineMode::Basic2D => {
+                use crate::prim2d::draw_triangles;
+
+                draw_triangles(
+                    &self.attributes,
+                    &self.pipeline.index_buf[range],
+                    frag_shader.unwrap_scalar(),
+                    color_buf,
+                    &mut self.pipeline.metrics,
+                );
+            }
+
+            PipelineMode::Simd2D => {
+                use crate::prim2d::simd::draw_triangles;
+
+                let color_buf = unsafe { color_buf.cast::<u32>() };
+                draw_triangles(
+                    &self.attributes,
+                    &self.pipeline.index_buf[range],
+                    frag_shader.unwrap_simd(),
+                    color_buf,
+                    &mut self.pipeline.metrics,
+                );
+            }
+        }
+    }
 
     pub fn get_metrics(&self) -> Metrics {
         self.pipeline.metrics
@@ -309,6 +558,51 @@ where
     }
 }
 
+pub struct Tile<'a> {
+    bbox: BBox<f32>,
+    color_buf: BorrowedMutTexture<'a, u32>,
+    depth_buf: BorrowedMutTexture<'a, f32>,
+    bins: Vec<Vec<[usize; 3]>>,
+}
+
+fn bin_triangles<'a, Attr>(
+    tiles: Arc<[BBox<f32>]>,
+    attributes: &'a [Attr],
+    indices: &'a [[usize; 3]],
+) -> Vec<Vec<[usize; 3]>>
+where
+    Attr: Attributes,
+{
+    const BIN_INIT_CAPACITY: usize = 1024;
+
+    let mut processed: Vec<Vec<[usize; 3]>> =
+        std::iter::repeat_with(|| Vec::with_capacity(BIN_INIT_CAPACITY))
+            .take(tiles.len())
+            .collect();
+
+    for &[ix0, ix1, ix2] in indices {
+        let v0 = attributes[ix0].position().xy();
+        let v1 = attributes[ix1].position().xy();
+        let v2 = attributes[ix2].position().xy();
+
+        let min = v0.min(v1).min(v2);
+        let max = v0.max(v1).max(v2);
+
+        let tri_bbox = BBox {
+            x: min.x,
+            y: max.y,
+            width: max.x - min.x,
+            height: max.y - min.y,
+        };
+        for (index, tile) in tiles.iter().enumerate() {
+            if tile.intersects(tri_bbox) {
+                processed[index].push([ix0, ix1, ix2]);
+            }
+        }
+    }
+
+    processed
+}
 
 #[derive(Default, Debug, Clone, Copy)]
 pub struct Metrics {
@@ -330,6 +624,14 @@ impl Metrics {
             #[cfg(feature = "performance-counters")]
             performance_counters: Default::default(),
         }
+    }
+
+    pub fn merge(&mut self, other: Metrics) {
+        self.triangles_drawn += other.triangles_drawn;
+        self.backfaces_culled += other.backfaces_culled;
+        self.sum_areas += other.sum_areas;
+        #[cfg(feature = "performance-counters")]
+        self.performance_counters.merge(other.performance_counters);
     }
 
     pub fn clear(&mut self) {
@@ -382,6 +684,11 @@ mod perf_counters {
             }
         }
 
+        pub fn merge(&mut self, other: Self) {
+            self.hits += other.hits;
+            self.cycles += other.cycles;
+        }
+
         pub fn clear(&mut self) {
             self.hits = 0;
             self.cycles = 0;
@@ -393,7 +700,10 @@ mod perf_counters {
             let &Counter { name, hits, cycles } = self;
             if hits > 0 {
                 let cy_per_hit = cycles as f64 / hits as f64;
-                write!(f, "{name}: {hits} hits, {cycles} cycles, {cy_per_hit:.2} cycles/hit")
+                write!(
+                    f,
+                    "{name}: {hits} hits, {cycles} cycles, {cy_per_hit:.2} cycles/hit"
+                )
             } else {
                 write!(f, "{name}: -")
             }
@@ -421,6 +731,10 @@ mod perf_counters {
             }
 
             impl $struct_name {
+                pub fn merge(&mut self, other: Self) {
+                    $(self.$name.merge(other.$name);)*
+                }
+
                 pub fn clear(&mut self) {
                     $(self.$name.clear();)*
                 }

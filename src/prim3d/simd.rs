@@ -11,27 +11,73 @@ use crate::{
     Attributes, AttributesSimd, FragmentShaderSimd, IntoSimd, ScreenPos,
 };
 
-// (b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x)
-// u.x         * (p.y - a.y) - u.y         * (p.x - a.x)
-// u.x * p.y - u.x * a.y - (u.y * p.x - u.y * a.x);
-// u.x * p.y - u.x * a.y + u.y * a.x - u.y * p.x;
-// u.x * p.y - B         + C         - u.y * p.x;
-// u.x * p.y + (-B)      + C         - u.y * p.x;
-// u.x * p.y +        (C - B)        - u.y * p.x;
-// u.x * p.y +           D           - u.y * p.x;
-// u.x * p.y - u.y * p.x + D;
-#[inline(always)]
-fn orient_2d_step(
-    from: Vec2i,
-    to: Vec2i,
-    p: Vec2i,
-) -> (Vec<Simd<i32, LANES>, 2>, Simd<i32, LANES>) {
-    let u = to - from;
-    let c = u.y * from.x - u.x * from.y;
-    let p = p.splat() + Vec::from([X_OFF, Y_OFF]);
-    let w = Simd::splat(u.x) * p.y - Simd::splat(u.y) * p.x + Simd::splat(c);
-    let inc = Vec2i::from([-u.y * STEP_X, u.x * STEP_Y]).splat();
-    (inc, w)
+pub fn draw_triangles<Attr, S>(
+    attr: &[Attr],
+    tris: &[[usize; 3]],
+    frag_shader: &S,
+    mut color_buf: BorrowedMutTexture<u32>,
+    mut depth_buf: BorrowedMutTexture<f32>,
+    width: usize,
+    height: usize,
+    bbox: BBox<i32>,
+    culling: CullingMode,
+    alpha_clip: Option<f32>,
+    metrics: &mut Metrics,
+) where
+    Attr: Attributes + AttributesSimd<LANES> + Copy,
+    S: FragmentShaderSimd<Attr, LANES>,
+{
+    let alpha_clip = alpha_clip.map(|alpha_clip| Simd::splat(alpha_clip));
+
+    for &[v0, v1, v2] in tris {
+        let (v0, v1, v2) = match culling {
+            CullingMode::FrontFace => (v0, v1, v2),
+            CullingMode::BackFace => (v2, v1, v0),
+            CullingMode::Disabled => {
+                let sign = orient_2d(
+                    attr[v0].position().xy(),
+                    attr[v1].position().xy(),
+                    attr[v2].position().xy(),
+                );
+                if sign > 0.0 {
+                    (v2, v1, v0)
+                } else {
+                    (v0, v1, v2)
+                }
+            }
+        };
+
+        let v0 = attr[v0];
+        let v1 = attr[v1];
+        let v2 = attr[v2];
+
+        let inside_frustum = is_inside_frustum(v0.position().xyz(), v1.position().xyz(), v2.position().xyz());
+        let p0 = v0.position().xyz();
+        let p1 = v1.position().xyz();
+        let p2 = v2.position().xyz();
+        // let inside_frustum = !(p0.x < -1. && p1.x < -1. && p2.x < -1.
+        //     || p0.x > 1. && p1.x > 1. && p2.x > 1.
+        //     || p0.y < -1. && p1.y < -1. && p2.y < -1.
+        //     || p0.y > 1. && p1.y > 1. && p2.y > 1.);
+        if !inside_frustum {
+            metrics.behind_culled += 1;
+            continue;
+        }
+
+        draw_triangle(
+            v0,
+            v1,
+            v2,
+            frag_shader,
+            color_buf.borrow_mut(),
+            depth_buf.borrow_mut(),
+            width as i32,
+            height as i32,
+            bbox,
+            alpha_clip,
+            &mut *metrics,
+        );
+    }
 }
 
 #[inline(always)]
@@ -45,7 +91,9 @@ fn draw_triangle<VertOut, S>(
     // TODO: Maybe these could be `MatrixSliceMut<Simd<u32, LANES>>`, since that's actually how they're used
     mut pixels: BorrowedMutTexture<u32>,
     mut depth_buf: BorrowedMutTexture<f32>,
-    aabb: BBox<i32>,
+    width: i32,
+    height: i32,
+    bbox: BBox<i32>,
     alpha_clip: Option<Simd<f32, LANES>>,
     metrics: &mut Metrics,
 ) where
@@ -53,10 +101,6 @@ fn draw_triangle<VertOut, S>(
     S: FragmentShaderSimd<VertOut, LANES>,
 {
     let stride = pixels.indexer().stride();
-    let width = pixels.width() as i32;
-    let height = pixels.height() as i32;
-    let pixels = pixels.as_slice_mut();
-    let depth_buf = depth_buf.as_slice_mut();
 
     let p0_ndc = *v0.position();
     let p1_ndc = *v1.position();
@@ -71,11 +115,11 @@ fn draw_triangle<VertOut, S>(
     if min.x & mask != 0 {
         min.x = min.x & !mask;
     }
-    min.x = min.x.max(aabb.x);
-    min.y = min.y.max(aabb.y);
+    min.x = min.x.max(bbox.x);
+    min.y = min.y.max(bbox.y);
     let max = p0_screen.max(p1_screen).max(p2_screen).min(Vec2i::from([
-        aabb.x + aabb.width - STEP_X,
-        aabb.y + aabb.height - STEP_Y,
+        bbox.x + bbox.width - (STEP_X - 1),
+        bbox.y + bbox.height - (STEP_Y - 1),
     ]));
 
     // 2 times the area of the triangle
@@ -100,7 +144,7 @@ fn draw_triangle<VertOut, S>(
 
     let inv_area = Simd::splat(1.0 / tri_area as f32);
 
-    let mut row_start = min.y as usize * stride + min.x as usize;
+    let mut row_start = (min.y - bbox.y) as usize * stride + (min.x - bbox.x) as usize;
 
     count_cycles! {
         #[counter(metrics.performance_counters.process_pixel, increment = ((max.x - min.x + 1) * (max.y - min.y + 1)) as u64)]
@@ -123,15 +167,17 @@ fn draw_triangle<VertOut, S>(
 
                     let z = w.dot(Vec::from([p0_ndc.z, p1_ndc.z, p2_ndc.z]).splat());
                     let prev_depth = unsafe {
-                        let ptr = &mut depth_buf[idx] as *const f32;
+                        let ptr = depth_buf.as_ptr().add(idx);
                         *ptr.cast::<Simd<f32, LANES>>()
                     };
                     let mut mask = mask & z.simd_lt(prev_depth);
 
                     if mask.any() {
+                        // TODO: This is wrong! This will also interpolate the NDC coordinates, which it shouldn't. The w coordinate should be interpolated using
+                        // 2D barycentrics instead of the perspective correct version.
                         let interp = AttributesSimd::interpolate(&v0, &v1, &v2, w_persp);
                         let simd_pixels =
-                            unsafe { &mut *(&mut pixels[idx] as *mut u32).cast::<SimdColorGamma>() };
+                            unsafe { &mut *pixels.as_mut_ptr().add(idx).cast::<SimdColorGamma>() };
                         let pixel_coords = Vec::from([Simd::splat(x), Simd::splat(y)]) + Vec::from([X_OFF, Y_OFF]);
 
                         let frag_color = frag_shader.exec(mask, pixel_coords, interp);
@@ -139,7 +185,7 @@ fn draw_triangle<VertOut, S>(
 
                         let new_depth = mask.select(z, prev_depth);
                         unsafe {
-                            let ptr = &mut depth_buf[idx] as *mut f32;
+                            let ptr = depth_buf.as_mut_ptr().add(idx);
                             *ptr.cast::<Simd<f32, LANES>>() = new_depth;
                         }
                     }
@@ -173,7 +219,9 @@ fn blend_pixels(
     alpha_clip: Option<SimdF32>,
 ) {
     let alpha = frag_output.w;
-    let colors = frag_output.map(|chan| (simd_clamp01(chan) * Simd::splat(255.)).cast::<u8>());
+    let prev_color = pixels.map(|chan| chan.cast::<f32>() / Simd::splat(255.));
+    let blended = frag_output * alpha + prev_color * (Simd::splat(1.) - alpha);
+    let blended_srgb = blended.map(|chan| (simd_clamp01(chan) * Simd::splat(255.)).cast::<u8>());
 
     if let Some(alpha_clip) = alpha_clip {
         *mask = *mask & alpha.simd_gt(alpha_clip);
@@ -186,73 +234,32 @@ fn blend_pixels(
     // let mask = mask.cast::<i8>();
     // let mask = Simd::splat(u32::from_ne_bytes(mask.to_int().cast().to_array()));
 
-    // *pixels = (colors & mask) + (*pixels & !mask);
+    // *pixels = (blended_srgb & mask) + (*pixels & !mask);
 
-    *pixels = colors.zip_with(*pixels, |c, p| mask.cast().select(c, p));
+    *pixels = blended_srgb.zip_with(*pixels, |c, p| mask.cast().select(c, p));
 }
 
-pub fn draw_triangles<Attr, S>(
-    attr: &[Attr],
-    tris: &[[usize; 3]],
-    frag_shader: &S,
-    mut color_buf: BorrowedMutTexture<u32>,
-    mut depth_buf: BorrowedMutTexture<f32>,
-    culling: CullingMode,
-    alpha_clip: Option<f32>,
-    metrics: &mut Metrics,
-) where
-    Attr: Attributes + AttributesSimd<LANES> + Copy,
-    S: FragmentShaderSimd<Attr, LANES>,
-{
-    let bbox = BBox {
-        x: 0,
-        y: 0,
-        width: color_buf.width() as i32,
-        height: color_buf.height() as i32,
-    };
-
-    let alpha_clip = alpha_clip.map(|alpha_clip| Simd::splat(alpha_clip));
-
-    for &[v0, v1, v2] in tris {
-        let (v0, v1, v2) = match culling {
-            CullingMode::FrontFace => (v0, v1, v2),
-            CullingMode::BackFace => (v2, v1, v0),
-            CullingMode::Disabled => {
-                let sign = orient_2d(
-                    attr[v0].position().xy(),
-                    attr[v1].position().xy(),
-                    attr[v2].position().xy(),
-                );
-                if sign > 0.0 {
-                    (v2, v1, v0)
-                } else {
-                    (v0, v1, v2)
-                }
-            }
-        };
-
-        let v0 = attr[v0];
-        let v1 = attr[v1];
-        let v2 = attr[v2];
-
-        let inside_frustum = is_inside_frustum(v0.position().xyz(), v1.position().xyz(), v2.position().xyz());
-        if !inside_frustum {
-            metrics.behind_culled += 1;
-            continue;
-        }
-
-        draw_triangle(
-            v0,
-            v1,
-            v2,
-            frag_shader,
-            color_buf.borrow_mut(),
-            depth_buf.borrow_mut(),
-            bbox,
-            alpha_clip,
-            &mut *metrics,
-        );
-    }
+// (b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x)
+// u.x         * (p.y - a.y) - u.y         * (p.x - a.x)
+// u.x * p.y - u.x * a.y - (u.y * p.x - u.y * a.x);
+// u.x * p.y - u.x * a.y + u.y * a.x - u.y * p.x;
+// u.x * p.y - B         + C         - u.y * p.x;
+// u.x * p.y + (-B)      + C         - u.y * p.x;
+// u.x * p.y +        (C - B)        - u.y * p.x;
+// u.x * p.y +           D           - u.y * p.x;
+// u.x * p.y - u.y * p.x + D;
+#[inline(always)]
+fn orient_2d_step(
+    from: Vec2i,
+    to: Vec2i,
+    p: Vec2i,
+) -> (Vec<Simd<i32, LANES>, 2>, Simd<i32, LANES>) {
+    let u = to - from;
+    let c = u.y * from.x - u.x * from.y;
+    let p = p.splat() + Vec::from([X_OFF, Y_OFF]);
+    let w = Simd::splat(u.x) * p.y - Simd::splat(u.y) * p.x + Simd::splat(c);
+    let inc = Vec2i::from([-u.y * STEP_X, u.x * STEP_Y]).splat();
+    (inc, w)
 }
 
 #[inline(always)]

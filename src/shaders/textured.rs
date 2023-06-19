@@ -1,7 +1,7 @@
 use crate::{
     texture::{BorrowedTextureRGBA, TextureWrap, RowMajorPowerOf2},
     vec::{Mat4x4, Vec, Vec2, Vec4, Vec4x4, Vec4xN},
-    Attributes, AttributesSimd, IntoSimd, StructureOfArray, Vertex, VertexShader, FragmentShaderSimd,
+    Attributes, AttributesSimd, IntoSimd, StructureOfArray, Vertex, VertexShader, FragmentShaderSimd, math_utils::{simd_remap, rgb_hex, simd_mix},
 };
 
 use std::simd::{Mask, Simd, LaneCount, SupportedLaneCount};
@@ -50,12 +50,18 @@ impl VertexShader<Vertex> for TexturedVertexShader {
 }
 
 pub struct TexturedFragmentShader<'a> {
+    near: f32,
+    far: f32,
     texture: BorrowedTextureRGBA<'a, RowMajorPowerOf2>,
 }
 
 impl<'a> TexturedFragmentShader<'a> {
     pub fn new(texture: BorrowedTextureRGBA<'a, RowMajorPowerOf2>) -> Self {
-        TexturedFragmentShader { texture }
+        TexturedFragmentShader {
+            near: 0.1,
+            far: 50.,
+            texture,
+        }
     }
 }
 
@@ -71,7 +77,14 @@ where
         attrs: TexturedAttributesSimd<LANES>,
     ) -> Vec4xN<LANES>
     {
-        self.texture.simd_index_uv(attrs.uv, mask, TextureWrap::Repeat)
+        let depth = simd_remap(
+            Simd::splat(1.) / attrs.position_ndc.w,
+            Simd::splat(self.near)..Simd::splat(self.far),
+            Simd::splat(0.)..Simd::splat(1.)
+        );
+        let fog_color = rgb_hex(0x61b7e8).splat();
+        let color = self.texture.simd_index_uv(attrs.uv, mask, TextureWrap::Repeat);
+        (simd_mix(fog_color, color.xyz(), depth * depth * depth), color.w).into()
     }
 
     // #[inline(always)]

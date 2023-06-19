@@ -1,6 +1,6 @@
 use crate::{
     VertexShader, Attributes,
-    vec::{Vec, Vec2i, Vec2, Vec3, Vec4}, pipeline::Metrics,
+    vec::{Vec, Vec2i, Vec2, Vec3, Vec4, Num}, pipeline::Metrics,
 };
 
 
@@ -42,15 +42,16 @@ pub struct BBox<T> {
     pub height: T,
 }
 
-/*
-impl<T: Num> BBox<T> {
+impl<T: Num + PartialOrd> BBox<T> {
     pub fn intersects(&self, other: BBox<T>) -> bool {
-        let x_intersection = (self.x + self.width).min(other.x + other.width) - self.x.max(other.x);
-        let y_intersection = (self.y + self.height).min(other.y + other.height) - self.y.max(other.y);
-        x_intersection > T::zero() && y_intersection > T::zero()
+        // let x_intersection = Num::min(self.x + self.width, other.x + other.width) - Num::max(self.x, other.x);
+        // let y_intersection = Num::min(self.y + self.height, other.y + other.height) - Num::max(self.y, other.y);
+        // x_intersection > T::zero() && y_intersection > T::zero()
+        let x_intersection = Num::min(self.x + self.width, other.x + other.width) - Num::max(self.x, other.x);
+        let y_intersection = Num::min(self.y, other.y) - Num::max(self.y - self.height, other.y - other.height);
+        x_intersection >= T::zero() && y_intersection >= T::zero()
     }
 }
-*/
 
 pub fn ndc_to_screen(ndc: Vec2, width: f32, height: f32) -> Vec2 {
     Vec2::from([
