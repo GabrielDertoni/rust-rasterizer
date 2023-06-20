@@ -1,30 +1,38 @@
 #![feature(portable_simd, slice_as_chunks)]
 
+use notify::{
+    event::{Event as NotifyEvent, EventKind as NotifyEventKind},
+    Watcher,
+};
 use pixels::{Pixels, SurfaceTexture};
+use raster_egui::{Cmd, Response};
 use winit::{
     dpi::{LogicalSize, PhysicalPosition},
-    event::{DeviceEvent, ElementState, Event, KeyboardInput, VirtualKeyCode, WindowEvent},
+    event::{
+        DeviceEvent, ElementState, Event, KeyboardInput, MouseButton, VirtualKeyCode, WindowEvent,
+    },
     event_loop::EventLoopBuilder,
-    window::{CursorGrabMode, WindowBuilder},
+    window::{CursorGrabMode, Window, WindowBuilder},
 };
-use notify::{event::{Event as NotifyEvent, EventKind as NotifyEventKind}, Watcher};
 
-use std::time::{Duration, Instant};
 use std::ops::Range;
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use rasterization::{
-    texture::{BorrowedMutTexture, BorrowedTexture}, clear_color,
-    obj::{Material, Obj},
-    shaders,
-    utils::{FpvCamera, FpsCounter},
-    vec::Vec3,
-    texture::OwnedTexture,
-    vert_buf::VertBuf, VertexBuf,
-    config::{Light, Scene, RenderingConfig, RasterizerConfig, RasterizerImplementation},
-    pipeline::PipelineMode,
-    FragmentShaderSimd,
+    clear_color,
+    config::{Light, RasterizerConfig, RasterizerImplementation, RenderingConfig, Scene},
     math::Size,
+    obj::{Material, Obj},
+    pipeline::PipelineMode,
+    shaders,
+    simd_config::LANES,
+    texture::OwnedTexture,
+    texture::{BorrowedMutTexture, BorrowedTexture},
+    utils::{FpsCounter, FpvCamera},
+    vec::Vec3,
+    vert_buf::VertBuf,
+    FragmentShaderSimd, VertexBuf,
 };
 
 struct Model {
@@ -59,10 +67,13 @@ pub struct World {
     enable_shadows: bool,
     rendering_cfg: RenderingConfig,
     rasterizer_cfg: RasterizerConfig,
+    // HACK: This option in just there to allow us to `.take()` it
+    gui_ctx: Option<raster_egui::Context>,
+    has_focus: bool,
 }
 
 impl World {
-    pub fn new(scene: Scene, root_path: PathBuf) -> anyhow::Result<Self> {
+    pub fn new(scene: Scene, root_path: PathBuf, window: &Window) -> anyhow::Result<Self> {
         let mut vert_buf = VertBuf::new();
         let mut index_buf = Vec::new();
         let mut models = Vec::new();
@@ -73,7 +84,7 @@ impl World {
             if !obj.has_normals() {
                 obj.compute_normals();
             }
-    
+
             let (vert, idx) = VertBuf::from_obj(&obj);
             let n_vert = vert.len();
             let n_faces = idx.len();
@@ -117,44 +128,58 @@ impl World {
                 textured_subsets,
                 face_range: offset..offset + n_faces,
             });
-            materials.extend(
-                obj.materials.into_iter()
-                    .map(|mut mat| {
-                        let (orig_width, orig_height) = (mat.map_kd.width() as usize, mat.map_kd.height() as usize);
-                        let (mut width, mut height) = (orig_width as usize, orig_height as usize);
-                        if !width.is_power_of_two() {
-                            width = width.next_power_of_two();
-                        }
-                        if !height.is_power_of_two() {
-                            height = height.next_power_of_two();
-                        }
-                        if width != orig_width || height != orig_height {
-                            let mut buf = vec![0u8; width * height * 4];
-                            let slice = &mat.map_kd as &[u8];
-                            for row in 0..orig_height {
-                                let start_row = row * width * 4;
-                                let start_row_orig = row * orig_width * 4;
-                                buf[start_row..start_row + orig_width * 4].copy_from_slice(&slice[start_row_orig..start_row_orig + orig_width * 4]);
-                            }
-                            mat.map_kd = image::ImageBuffer::<image::Rgba<u8>, _>::from_vec(width as u32, height as u32, buf).unwrap();
-                        }
-                        mat
-                    })
-            );
+            materials.extend(obj.materials.into_iter().map(|mut mat| {
+                let (orig_width, orig_height) =
+                    (mat.map_kd.width() as usize, mat.map_kd.height() as usize);
+                let (mut width, mut height) = (orig_width as usize, orig_height as usize);
+                if !width.is_power_of_two() {
+                    width = width.next_power_of_two();
+                }
+                if !height.is_power_of_two() {
+                    height = height.next_power_of_two();
+                }
+                if width != orig_width || height != orig_height {
+                    let mut buf = vec![0u8; width * height * 4];
+                    let slice = &mat.map_kd as &[u8];
+                    for row in 0..orig_height {
+                        let start_row = row * width * 4;
+                        let start_row_orig = row * orig_width * 4;
+                        buf[start_row..start_row + orig_width * 4].copy_from_slice(
+                            &slice[start_row_orig..start_row_orig + orig_width * 4],
+                        );
+                    }
+                    mat.map_kd = image::ImageBuffer::<image::Rgba<u8>, _>::from_vec(
+                        width as u32,
+                        height as u32,
+                        buf,
+                    )
+                    .unwrap();
+                }
+                mat
+            }));
         }
 
-        let lights = scene.lights.into_iter().map(|light| {
-            let size = light.shadow_map_size.expect("TODO: have default value for shadow map config");
-            LightInfo {
-                shadow_map: OwnedTexture::from_vec(size, size, vec![0.0; size * size]),
-                light,
-            }
-        })
-        .collect();
+        let lights = scene
+            .lights
+            .into_iter()
+            .map(|light| {
+                let size = light
+                    .shadow_map_size
+                    .expect("TODO: have default value for shadow map config");
+                LightInfo {
+                    shadow_map: OwnedTexture::from_vec(size, size, vec![0.0; size * size]),
+                    light,
+                }
+            })
+            .collect();
 
         let enable_shadows = match scene.config.get("enable-shadows") {
             Some(&toml::Value::Boolean(value)) => value,
-            Some(_) => return Err(anyhow::anyhow!("expected value of `config.enable-shadows` to be a boolean")),
+            Some(_) => {
+                return Err(anyhow::anyhow!(
+                    "expected value of `config.enable-shadows` to be a boolean"
+                ))
+            }
             None => false,
         };
 
@@ -178,10 +203,12 @@ impl World {
             enable_shadows,
             rendering_cfg: scene.rendering,
             rasterizer_cfg: scene.rasterizer,
+            gui_ctx: Some(raster_egui::Context::new(egui::Context::default(), window)),
+            has_focus: true,
         })
     }
 
-    pub fn render(&mut self, buf: &mut [u8], dt: Duration) {
+    pub fn render(&mut self, buf: &mut [u8], dt: Duration, window: &Window) {
         let (pixels, _) = buf.as_chunks_mut::<4>();
         let mut pixels = BorrowedMutTexture::from_mut_slice(
             self.rendering_cfg.width as usize,
@@ -200,8 +227,9 @@ impl World {
                 todo!();
                 // self.render_with_shadows(pixels);
             } else {
-                self.render_without_shadows(pixels);
+                self.render_without_shadows(pixels.borrow_mut());
             }
+            self.draw_gui(pixels, window);
             self.fps_counter.record_measurement(start.elapsed());
         }
 
@@ -221,7 +249,9 @@ impl World {
 
         depth_buf.as_slice_mut().fill(1.0);
 
-        let camera_transform = self.camera.transform_matrix(self.rendering_cfg.near, self.rendering_cfg.far);
+        let camera_transform = self
+            .camera
+            .transform_matrix(self.rendering_cfg.near, self.rendering_cfg.far);
 
         let vert_shader = shaders::textured::TexturedVertexShader::new(camera_transform);
         let mut pipeline = Pipeline::new(
@@ -255,9 +285,11 @@ impl World {
                     texture_pixels,
                 );
                 let frag_shader = shaders::textured::TexturedFragmentShader::new(texture);
-    
-                pipeline.draw_par(subset.range.clone(), FragmentShaderSimd::<_, 8>::simd_impl(&frag_shader));
-                // pipeline.draw(subset.range.clone(), FragmentShaderSimd::<_, 4>::simd_impl(&frag_shader));
+
+                pipeline.draw_par(
+                    subset.range.clone(),
+                    FragmentShaderSimd::<_, LANES>::simd_impl(&frag_shader),
+                );
             }
         }
         println!("time to render models: {:?}", start.elapsed());
@@ -269,41 +301,162 @@ impl World {
     pub fn update_cursor(&mut self, dx: f32, dy: f32) {
         self.camera.rotate_delta(dy, dx);
     }
+
+    pub fn handle_event<T>(&mut self, event: Event<T>) -> Response {
+        let mut is_mouse_click = false;
+        let response = match &event {
+            &Event::WindowEvent {
+                event:
+                    WindowEvent::KeyboardInput {
+                        input:
+                            KeyboardInput {
+                                state,
+                                virtual_keycode: Some(key),
+                                ..
+                            },
+                        is_synthetic: false,
+                        ..
+                    },
+                ..
+            } => self.handle_key(state, key),
+            &Event::DeviceEvent {
+                event: DeviceEvent::MouseMotion { delta: (dx, dy) },
+                ..
+            } if self.has_focus() => {
+                self.update_cursor(dx as f32, dy as f32);
+                Response::consumed()
+            }
+            &Event::WindowEvent {
+                event:
+                    WindowEvent::MouseInput {
+                        state: ElementState::Pressed,
+                        button: MouseButton::Left,
+                        ..
+                    },
+                ..
+            } => {
+                is_mouse_click = true;
+                Response::empty()
+            }
+            _ => Response::empty(),
+        };
+
+        if !response.consumed {
+            let response = self.gui_ctx.as_mut().unwrap().handle_event(event);
+            if !response.consumed && is_mouse_click {
+                self.has_focus = true;
+            }
+            response
+        } else {
+            response
+        }
+    }
+
+    fn handle_key(&mut self, state: ElementState, key: VirtualKeyCode) -> Response {
+        if !self.has_focus {
+            return Response::empty();
+        }
+        match (state, key) {
+            (ElementState::Pressed, VirtualKeyCode::Escape) => self.has_focus = false,
+            (ElementState::Pressed, VirtualKeyCode::V) => self.axis.z = 1.0,
+            (ElementState::Pressed, VirtualKeyCode::C) => self.axis.z = -1.0,
+            (ElementState::Released, VirtualKeyCode::V | VirtualKeyCode::C) => self.axis.z = 0.0,
+            (ElementState::Pressed, VirtualKeyCode::W) => self.axis.y = 1.0,
+            (ElementState::Pressed, VirtualKeyCode::S) => self.axis.y = -1.0,
+            (ElementState::Released, VirtualKeyCode::W | VirtualKeyCode::S) => self.axis.y = 0.0,
+            (ElementState::Pressed, VirtualKeyCode::A) => self.axis.x = -1.0,
+            (ElementState::Pressed, VirtualKeyCode::D) => self.axis.x = 1.0,
+            (ElementState::Released, VirtualKeyCode::A | VirtualKeyCode::D) => self.axis.x = 0.0,
+            (ElementState::Pressed, VirtualKeyCode::Right) => self.update_cursor(20., 0.),
+            (ElementState::Pressed, VirtualKeyCode::Left) => self.update_cursor(-20., 0.),
+            (ElementState::Pressed, VirtualKeyCode::Up) => self.update_cursor(0., 20.),
+            (ElementState::Pressed, VirtualKeyCode::Down) => self.update_cursor(0., -20.),
+            (ElementState::Pressed, VirtualKeyCode::H) => {
+                self.enable_shadows = !self.enable_shadows
+            }
+            _ => return Response::empty(),
+        };
+        Response {
+            consumed: true,
+            cmd: None,
+        }
+    }
+
+    pub fn draw_gui(&mut self, pixels: BorrowedMutTexture<[u8; 4]>, window: &Window) {
+        let mut gui_ctx = self.gui_ctx.take().unwrap();
+        gui_ctx.redraw(self, pixels, window);
+        self.gui_ctx.replace(gui_ctx);
+    }
+
+    pub fn has_focus(&self) -> bool {
+        self.has_focus
+    }
+}
+
+impl raster_egui::App for World {
+    fn update(&mut self, ctx: &egui::Context) {
+        egui::Window::new("Info")
+            .resizable(true)
+            .constrain(false)
+            .drag_bounds(egui::Rect::EVERYTHING)
+            .show(ctx, |ui| {
+                ui.style_mut().override_text_style = Some(egui::TextStyle::Monospace);
+
+                ui.label("Camera");
+                ui.label(format!("position {:.1}", self.camera.position));
+                ui.label(format!("pitch {:.1}", self.camera.pitch));
+                ui.label(format!("yaw {:.1}", self.camera.yaw));
+                ui.add_space(10.);
+
+                ui.label("Models");
+                ui.label(format!("{:6} vertices", self.vert_buf.len()));
+                ui.label(format!("{:6} faces", self.index_buf.len()));
+                ui.add_space(10.);
+
+                ui.label("Rendering");
+                ui.label(format!("{:6.1} FPS", self.fps_counter.mean_fps()));
+                ui.label(format!("{:6.1?} per frame", self.fps_counter.mean_time()));
+            });
+    }
 }
 
 fn main() -> anyhow::Result<()> {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
-    let Some(scene_path) = args.get(0).map(PathBuf::from) else {
+    let Some(scene_path) = args.get(0) else {
         return Err(anyhow::anyhow!("expected a command line argument indicating the scene to load, but got none"));
     };
+    let scene_path = scene_path.parse::<PathBuf>()?;
     let scene = Scene::load_toml(&scene_path)?;
     let event_loop = EventLoopBuilder::<NotifyEvent>::with_user_event().build();
     let window = WindowBuilder::new()
         .with_title("rasterizer")
-        .with_inner_size(LogicalSize::new(scene.rendering.width as u32, scene.rendering.height as u32))
+        .with_inner_size(LogicalSize::new(
+            scene.rendering.width as u32,
+            scene.rendering.height as u32,
+        ))
         .build(&event_loop)
         .unwrap();
 
     let wsize = window.inner_size();
     let mut pixels = {
         let surface_texture = SurfaceTexture::new(wsize.width, wsize.height, &window);
-        Pixels::new(scene.rendering.width as u32, scene.rendering.height as u32, surface_texture).unwrap()
+        Pixels::new(
+            scene.rendering.width as u32,
+            scene.rendering.height as u32,
+            surface_texture,
+        )
+        .unwrap()
     };
 
     let fps = scene.rendering.fps;
-    let mut world = World::new(scene, scene_path.parent().unwrap().to_owned())?;
+    let mut world = World::new(scene, scene_path.parent().unwrap().to_owned(), &window)?;
 
     let event_loop_sender = event_loop.create_proxy();
-    let mut watcher = notify::recommended_watcher(move |res| {
-        match res {
-            Ok(event) => _ = event_loop_sender.send_event(event),
-            Err(e) => eprintln!("watch error: {e}"),
-        }
+    let mut watcher = notify::recommended_watcher(move |res| match res {
+        Ok(event) => _ = event_loop_sender.send_event(event),
+        Err(e) => eprintln!("watch error: {e}"),
     })?;
     watcher.watch(scene_path.as_ref(), notify::RecursiveMode::NonRecursive)?;
-
-    let core_id = core_affinity::get_core_ids().unwrap()[0];
-    core_affinity::set_for_current(core_id);
 
     let target_render_time = fps.map(|fps| Duration::from_secs_f32(1. / fps));
 
@@ -321,7 +474,7 @@ fn main() -> anyhow::Result<()> {
             control_flow.set_poll();
         }
 
-        if window.has_focus() {
+        if window.has_focus() && world.has_focus() {
             window
                 .set_cursor_grab(CursorGrabMode::Locked)
                 .or_else(|_| window.set_cursor_grab(CursorGrabMode::Confined))
@@ -340,45 +493,6 @@ fn main() -> anyhow::Result<()> {
                 event: WindowEvent::CloseRequested,
                 ..
             } => control_flow.set_exit(),
-            Event::WindowEvent {
-                event:
-                    WindowEvent::KeyboardInput {
-                        input:
-                            KeyboardInput {
-                                state,
-                                virtual_keycode: Some(virtual_keycode),
-                                ..
-                            },
-                        is_synthetic: false,
-                        ..
-                    },
-                ..
-            } => match (state, virtual_keycode) {
-                (ElementState::Pressed, VirtualKeyCode::Escape) => control_flow.set_exit(),
-                (ElementState::Pressed, VirtualKeyCode::V) => world.axis.z = 1.0,
-                (ElementState::Pressed, VirtualKeyCode::C) => world.axis.z = -1.0,
-                (ElementState::Released, VirtualKeyCode::V | VirtualKeyCode::C) => {
-                    world.axis.z = 0.0
-                }
-                (ElementState::Pressed, VirtualKeyCode::W) => world.axis.y = 1.0,
-                (ElementState::Pressed, VirtualKeyCode::S) => world.axis.y = -1.0,
-                (ElementState::Released, VirtualKeyCode::W | VirtualKeyCode::S) => {
-                    world.axis.y = 0.0
-                }
-                (ElementState::Pressed, VirtualKeyCode::A) => world.axis.x = -1.0,
-                (ElementState::Pressed, VirtualKeyCode::D) => world.axis.x = 1.0,
-                (ElementState::Released, VirtualKeyCode::A | VirtualKeyCode::D) => {
-                    world.axis.x = 0.0
-                }
-                (ElementState::Pressed, VirtualKeyCode::Right) => world.update_cursor(20., 0.),
-                (ElementState::Pressed, VirtualKeyCode::Left) => world.update_cursor(-20., 0.),
-                (ElementState::Pressed, VirtualKeyCode::Up) => world.update_cursor(0., 20.),
-                (ElementState::Pressed, VirtualKeyCode::Down) => world.update_cursor(0., -20.),
-                (ElementState::Pressed, VirtualKeyCode::H) => {
-                    world.enable_shadows = !world.enable_shadows
-                }
-                _ => (),
-            },
             Event::MainEventsCleared => {
                 if target_render_time.is_none() {
                     window.request_redraw()
@@ -388,7 +502,7 @@ fn main() -> anyhow::Result<()> {
                 let dt = start.elapsed();
                 start = Instant::now();
 
-                world.render(pixels.frame_mut(), dt);
+                world.render(pixels.frame_mut(), dt, &window);
                 pixels.render().unwrap();
 
                 println!("FPS: {:.1}", 1. / dt.as_secs_f32());
@@ -397,12 +511,6 @@ fn main() -> anyhow::Result<()> {
                     next_frame = start + target_render_time;
                     control_flow.set_wait_until(next_frame);
                 }
-            }
-            Event::DeviceEvent {
-                event: DeviceEvent::MouseMotion { delta: (dx, dy) },
-                ..
-            } => {
-                world.update_cursor(dx as f32, dy as f32);
             }
             Event::UserEvent(NotifyEvent {
                 kind: NotifyEventKind::Create(_) | NotifyEventKind::Modify(_),
@@ -415,7 +523,7 @@ fn main() -> anyhow::Result<()> {
                         return;
                     }
                 };
-                world = match World::new(scene, scene_path.parent().unwrap().to_owned()) {
+                world = match World::new(scene, scene_path.parent().unwrap().to_owned(), &window) {
                     Ok(world) => world,
                     Err(e) => {
                         eprintln!("[ERROR] while trying to create world and hot reload scene: {e}");
@@ -423,7 +531,19 @@ fn main() -> anyhow::Result<()> {
                     }
                 };
             }
-            _ => (),
+            event => {
+                let response = world.handle_event(event);
+                if let Some(cmd) = response.cmd {
+                    match cmd {
+                        Cmd::Resize(wsize) => {
+                            pixels.resize_buffer(wsize.width, wsize.height).unwrap();
+                            pixels.resize_surface(wsize.width, wsize.height).unwrap();
+                        }
+                        Cmd::Redraw => window.request_redraw(),
+                        Cmd::Exit => control_flow.set_exit(),
+                    }
+                }
+            }
         }
     })
 }

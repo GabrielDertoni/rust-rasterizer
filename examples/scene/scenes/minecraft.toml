@@ -1,5 +1,6 @@
 [[models]]
-path = "../models/lost_empire/lost_empire.obj"
+# path = "../../../models/lost_empire/lost_empire.obj"
+path = "..\\..\\..\\models\\lost_empire\\lost_empire.obj"
 
 [camera]
 kind = "fpv"

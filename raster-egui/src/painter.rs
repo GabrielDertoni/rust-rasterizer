@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use egui::{ClippedPrimitive, TextureId, TexturesDelta};
 use epaint::{image::ImageData, Mesh, Primitive};
 
-use rasterization::{texture::{BorrowedMutTexture, OwnedTexture}, pipeline::PipelineMode, FragmentShader, FragmentShaderSimd};
+use rasterization::{texture::{BorrowedMutTexture, OwnedTexture}, pipeline::PipelineMode, FragmentShader};
 
 fn color_image_to_texture(image: epaint::image::ColorImage) -> OwnedTexture<[u8; 4]> {
     let tex = OwnedTexture::from_vec(image.width(), image.height(), image.pixels);
@@ -45,7 +45,7 @@ impl Painter {
         mut color_buf: BorrowedMutTexture<'a, [u8; 4]>,
     ) {
         self.update_textures(deltas);
-        let start = std::time::Instant::now();
+        // let start = std::time::Instant::now();
         for prim in primitives {
             if let Primitive::Mesh(mesh) = prim.primitive {
                 self.paint_mesh(mesh, egui_ctx, color_buf.borrow_mut());
@@ -53,21 +53,21 @@ impl Painter {
                 panic!("custom rendering callbacks are not implemented for this backend");
             }
         }
-        eprintln!("# textures: {}", self.textures.len());
-        eprintln!("draw time: {:?}", start.elapsed());
+        // eprintln!("# textures: {}", self.textures.len());
+        // eprintln!("draw time: {:?}", start.elapsed());
     }
 
     fn paint_mesh<'a>(&self, mesh: Mesh, egui_ctx: &egui::Context, color_buf: BorrowedMutTexture<'a, [u8; 4]>) {
         use rasterization::{pipeline::Pipeline, config::CullingMode};
 
-        eprintln!("painting mesh with {} triangles", mesh.indices.len() / 3);
+        // eprintln!("painting mesh with {} triangles", mesh.indices.len() / 3);
 
         let tex = &self.textures[&mesh.texture_id];
 
         let indices: Vec<usize> = mesh.indices.into_iter().map(|i| i as usize).collect();
         let (indices, tail) = indices.as_chunks::<3>();
         assert_eq!(tail.len(), 0);
-        let mut pipeline = Pipeline::new(mesh.vertices.as_slice(), indices, PipelineMode::Basic2D);
+        let mut pipeline = Pipeline::new(mesh.vertices.as_slice(), indices, color_buf.size(), PipelineMode::Basic2D);
         pipeline.set_culling_mode(CullingMode::Disabled);
         let width = color_buf.width();
         let height = color_buf.height();

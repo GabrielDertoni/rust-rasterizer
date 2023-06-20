@@ -1,0 +1,17 @@
+[package]
+name = "scene"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+rasterization.path = "../.."
+raster-egui.path = "../../raster-egui"
+anyhow.workspace = true
+pixels.workspace = true
+winit.workspace = true
+image.workspace = true
+notify = { version = "6", default-features = false }
+toml = "0.7.4"
+egui = "0.22"

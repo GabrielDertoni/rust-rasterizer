@@ -9,7 +9,7 @@ pub use storage::*;
 
 use crate::{
     math_utils::{simd_clamp01, simd_wrap01},
-    vec::{Vec, Vec2, Vec2xN, Vec4xN},
+    vec::{Vec, Vec2, Vec2xN, Vec4xN}, math::Size,
 };
 
 pub struct Texture<T, S, I = RowMajor, Width: Dim = SomeNat, Height: Dim = SomeNat> {
@@ -96,6 +96,10 @@ where
 
     pub fn len(&self) -> usize {
         self.width() * self.height()
+    }
+
+    pub fn size(&self) -> Size<usize> {
+        Size::new(self.width(), self.height())
     }
 
     pub fn as_ptr<'a>(&'a self) -> *const T {

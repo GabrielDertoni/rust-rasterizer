@@ -211,7 +211,7 @@ where
                 .collect()
         };
 
-        println!("process vertices: {:?}", start.elapsed());
+        self.metrics.vertex_processing_time.count(start.elapsed());
 
         ProcessedVertices {
             pipeline: self,
@@ -655,6 +655,7 @@ pub struct Metrics {
     pub behind_culled: usize,
     pub sum_areas: i64,
     pub binning_time: TimeCounter,
+    pub vertex_processing_time: TimeCounter,
     #[cfg(feature = "performance-counters")]
     pub performance_counters: perf_counters::PerformanceCounters,
 }
@@ -667,6 +668,7 @@ impl Metrics {
             behind_culled: 0,
             sum_areas: 0,
             binning_time: TimeCounter::new("binning time"),
+            vertex_processing_time: TimeCounter::new("vertex processing time"),
             #[cfg(feature = "performance-counters")]
             performance_counters: Default::default(),
         }
@@ -676,6 +678,8 @@ impl Metrics {
         self.triangles_drawn += other.triangles_drawn;
         self.backfaces_culled += other.backfaces_culled;
         self.sum_areas += other.sum_areas;
+        self.binning_time.merge(other.binning_time);
+        self.vertex_processing_time.merge(other.vertex_processing_time);
         #[cfg(feature = "performance-counters")]
         self.performance_counters.merge(other.performance_counters);
     }
@@ -686,6 +690,7 @@ impl Metrics {
         self.behind_culled = 0;
         self.sum_areas = 0;
         self.binning_time.clear();
+        self.vertex_processing_time.clear();
         #[cfg(feature = "performance-counters")]
         self.performance_counters.clear();
     }
@@ -699,6 +704,7 @@ impl Default for Metrics {
             behind_culled: Default::default(),
             sum_areas: Default::default(),
             binning_time: TimeCounter::new("binning time"),
+            vertex_processing_time: TimeCounter::new("vertex processing time"),
             #[cfg(feature = "performance-counters")]
             performance_counters: Default::default(),
         }
@@ -713,6 +719,7 @@ impl std::fmt::Display for Metrics {
             behind_culled,
             sum_areas,
             binning_time,
+            vertex_processing_time,
             #[cfg(feature = "performance-counters")]
             performance_counters,
         } = self;
@@ -721,6 +728,7 @@ impl std::fmt::Display for Metrics {
         writeln!(f, "\tbackfaces culled: {backfaces_culled}")?;
         writeln!(f, "\tbehind culled: {behind_culled}")?;
         writeln!(f, "\t{binning_time}",)?;
+        writeln!(f, "\t{vertex_processing_time}",)?;
         let mean_area = sum_areas as f64 / (2. * triangles_drawn as f64);
         writeln!(f, "\tmean triangle area: {mean_area:.2}")?;
         #[cfg(feature = "performance-counters")]

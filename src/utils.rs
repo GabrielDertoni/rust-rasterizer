@@ -63,6 +63,9 @@ impl FpsCounter {
     }
 
     pub fn mean_time(&self) -> Duration {
+        if self.measured_times.len() == 0 {
+            return Duration::ZERO;
+        }
         self.measured_times.iter().sum::<Duration>() / self.measured_times.len() as u32
     }
 

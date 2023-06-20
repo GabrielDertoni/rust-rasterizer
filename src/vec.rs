@@ -464,22 +464,24 @@ impl<T: fmt::Display, const M: usize, const N: usize> fmt::Display for Mat<T, M,
             f: &mut fmt::Formatter<'_>,
             width: usize,
         ) -> fmt::Result {
+            let precision = f.precision().unwrap_or(2);
             write!(f, "[")?;
             if N > 0 {
-                write!(f, "{:width$}", &row[0])?;
+                write!(f, "{:width$.precision$}", &row[0])?;
             }
             for j in 1..N {
                 write!(f, ", ")?;
-                write!(f, "{:width$}", &row[j])?;
+                write!(f, "{:width$.precision$}", &row[j])?;
             }
             write!(f, "]")
         }
         let mut maxlen = 0;
         let mut buf = String::new();
+        let precision = f.precision().unwrap_or(2);
         for i in 0..M {
             for j in 0..N {
                 buf.clear();
-                write!(&mut buf, "{}", self.rows[i][j])?;
+                write!(&mut buf, "{:.precision$}", self.rows[i][j])?;
                 maxlen = Ord::max(maxlen, buf.len());
             }
         }
