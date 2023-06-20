@@ -298,8 +298,9 @@ where
 
 // TODO: Generalize
 impl<'a, T> Texture<T, BorrowedMutStorage<'a, T>, RowMajor, SomeNat, SomeNat> {
+    #[track_caller]
     pub fn split_mut_vert(&mut self, idx: usize) -> (Self, Self) {
-        assert!(idx < self.width());
+        assert!(idx <= self.width(), "out of bounds");
         (
             Texture {
                 width: SomeNat::from_usize(idx),
@@ -324,8 +325,9 @@ impl<'a, T> Texture<T, BorrowedMutStorage<'a, T>, RowMajor, SomeNat, SomeNat> {
         )
     }
 
+    #[track_caller]
     pub fn split_mut_horz(&mut self, idx: usize) -> (Self, Self) {
-        assert!(idx < self.height());
+        assert!(idx <= self.height(), "out of bounds");
         (
             Texture {
                 width: SomeNat::from_usize(self.width()),

@@ -132,6 +132,8 @@ impl Axis {
 pub struct RenderingConfig {
     pub width: usize,
     pub height: usize,
+    #[serde(default)]
+    pub fps: Option<f32>,
     #[serde(default = "RenderingConfig::near_default")]
     pub near: f32,
     #[serde(default = "RenderingConfig::far_default")]

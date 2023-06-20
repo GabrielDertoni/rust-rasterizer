@@ -7,7 +7,7 @@ use crate::{
     vec::{Vec, Vec2i, Vec3, Vec4},
     pipeline::Metrics,
     texture::BorrowedMutTexture,
-    common::*, config::CullingMode,
+    common::*, config::CullingMode, math::BBox,
 };
 
 pub fn draw_triangles<Attr, S>(

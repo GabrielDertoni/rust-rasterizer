@@ -6,17 +6,18 @@ kind = "fpv"
 up = "z"
 position = [-7.4, 30.8, 12.7]
 rotation = [87.4295, 0.0, -180.382]
-fovy = 39.6
+fovy = 70.0
 sensitivity = 0.05
 speed = 5.0
 
 [rendering]
 width = 1280
 height = 720
+fps = 60.0
 near = 0.1
 far = 50
 alpha-clip = 0.1
-cull-mode = "back-face"
+cull-mode = "disabled"
 
 [rasterizer]
 implementation = "bbox-simd"

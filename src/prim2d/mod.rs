@@ -5,7 +5,7 @@ use crate::{
     pipeline::Metrics,
     texture::BorrowedMutTexture,
     vec::{Vec, Vec2i, Vec4},
-    Attributes, FragmentShader,
+    Attributes, FragmentShader, math::BBox,
 };
 
 pub fn draw_triangles<Attr, S>(

@@ -1,4 +1,4 @@
-use std::simd::{Mask, Simd, SimdFloat, SimdPartialOrd};
+use std::simd::{Simd, SimdPartialOrd};
 
 use crate::{
     common::*,
@@ -7,8 +7,8 @@ use crate::{
     pipeline::Metrics,
     simd_config::*,
     texture::BorrowedMutTexture,
-    vec::{Vec, Vec2i, Vec3, Vec4x4},
-    Attributes, AttributesSimd, FragmentShaderSimd, IntoSimd, ScreenPos,
+    vec::{Vec, Vec2i, Vec3},
+    Attributes, AttributesSimd, FragmentShaderSimd, IntoSimd, ScreenPos, math::BBox,
 };
 
 pub fn draw_triangles<Attr, S>(
@@ -17,8 +17,6 @@ pub fn draw_triangles<Attr, S>(
     frag_shader: &S,
     mut color_buf: BorrowedMutTexture<u32>,
     mut depth_buf: BorrowedMutTexture<f32>,
-    width: usize,
-    height: usize,
     bbox: BBox<i32>,
     culling: CullingMode,
     alpha_clip: Option<f32>,
@@ -40,9 +38,9 @@ pub fn draw_triangles<Attr, S>(
                     attr[v2].position().xy(),
                 );
                 if sign > 0.0 {
-                    (v2, v1, v0)
-                } else {
                     (v0, v1, v2)
+                } else {
+                    (v2, v1, v0)
                 }
             }
         };
@@ -51,14 +49,10 @@ pub fn draw_triangles<Attr, S>(
         let v1 = attr[v1];
         let v2 = attr[v2];
 
-        let inside_frustum = is_inside_frustum(v0.position().xyz(), v1.position().xyz(), v2.position().xyz());
-        let p0 = v0.position().xyz();
-        let p1 = v1.position().xyz();
-        let p2 = v2.position().xyz();
-        // let inside_frustum = !(p0.x < -1. && p1.x < -1. && p2.x < -1.
-        //     || p0.x > 1. && p1.x > 1. && p2.x > 1.
-        //     || p0.y < -1. && p1.y < -1. && p2.y < -1.
-        //     || p0.y > 1. && p1.y > 1. && p2.y > 1.);
+        let inside_frustum = (-1.0..1.0).contains(&v0.position().z)
+            && (-1.0..1.0).contains(&v1.position().z)
+            && (-1.0..1.0).contains(&v2.position().z);
+
         if !inside_frustum {
             metrics.behind_culled += 1;
             continue;
@@ -71,8 +65,6 @@ pub fn draw_triangles<Attr, S>(
             frag_shader,
             color_buf.borrow_mut(),
             depth_buf.borrow_mut(),
-            width as i32,
-            height as i32,
             bbox,
             alpha_clip,
             &mut *metrics,
@@ -82,7 +74,7 @@ pub fn draw_triangles<Attr, S>(
 
 #[inline(always)]
 fn draw_triangle<VertOut, S>(
-    // Accessing `vi.position()` must return a `Vec4` where xyz are in NDC and w is 1/z.
+    // Accessing `vi.position()` must return a `Vec4` where xy are in viewport, z is in NDC and w is 1/z.
     v0: VertOut,
     v1: VertOut,
     v2: VertOut,
@@ -91,8 +83,6 @@ fn draw_triangle<VertOut, S>(
     // TODO: Maybe these could be `MatrixSliceMut<Simd<u32, LANES>>`, since that's actually how they're used
     mut pixels: BorrowedMutTexture<u32>,
     mut depth_buf: BorrowedMutTexture<f32>,
-    width: i32,
-    height: i32,
     bbox: BBox<i32>,
     alpha_clip: Option<Simd<f32, LANES>>,
     metrics: &mut Metrics,
@@ -106,28 +96,28 @@ fn draw_triangle<VertOut, S>(
     let p1_ndc = *v1.position();
     let p2_ndc = *v2.position();
 
-    let p0_screen = ndc_to_screen(p0_ndc.xy(), width as f32, height as f32).to_i32();
-    let p1_screen = ndc_to_screen(p1_ndc.xy(), width as f32, height as f32).to_i32();
-    let p2_screen = ndc_to_screen(p2_ndc.xy(), width as f32, height as f32).to_i32();
+    let p0i = p0_ndc.xy().to_i32();
+    let p1i = p1_ndc.xy().to_i32();
+    let p2i = p2_ndc.xy().to_i32();
 
-    let mut min = p0_screen.min(p1_screen).min(p2_screen);
+    let mut min = p0i.min(p1i).min(p2i);
     let mask = LANES as i32 - 1;
     if min.x & mask != 0 {
         min.x = min.x & !mask;
     }
     min.x = min.x.max(bbox.x);
     min.y = min.y.max(bbox.y);
-    let max = p0_screen.max(p1_screen).max(p2_screen).min(Vec2i::from([
+    let max = p0i.max(p1i).max(p2i).min(Vec2i::from([
         bbox.x + bbox.width - (STEP_X - 1),
         bbox.y + bbox.height - (STEP_Y - 1),
     ]));
 
     // 2 times the area of the triangle
-    let tri_area = orient_2d(p0_screen, p1_screen, p2_screen);
+    let tri_area = orient_2d(p0i, p1i, p2i);
 
     let nz = {
-        let u = p0_screen - p1_screen;
-        let v = p2_screen - p1_screen;
+        let u = p0i - p1i;
+        let v = p2i - p1i;
         u.x * v.y - u.y * v.x
     };
 
@@ -138,9 +128,9 @@ fn draw_triangle<VertOut, S>(
         return;
     }
 
-    let (w0_inc, mut w0_row) = orient_2d_step(p1_screen, p2_screen, min);
-    let (w1_inc, mut w1_row) = orient_2d_step(p2_screen, p0_screen, min);
-    let (w2_inc, mut w2_row) = orient_2d_step(p0_screen, p1_screen, min);
+    let (w0_inc, mut w0_row) = orient_2d_step(p1i, p2i, min);
+    let (w1_inc, mut w1_row) = orient_2d_step(p2i, p0i, min);
+    let (w2_inc, mut w2_row) = orient_2d_step(p0i, p1i, min);
 
     let inv_area = Simd::splat(1.0 / tri_area as f32);
 
@@ -263,25 +253,9 @@ fn orient_2d_step(
 }
 
 #[inline(always)]
-fn is_triangle_visible(
-    p0_screen: Vec2i,
-    p1_screen: Vec2i,
-    p2_screen: Vec2i,
-    z0: f32,
-    z1: f32,
-    z2: f32,
-    aabb: BBox<i32>,
-) -> bool {
-    let inside_frustum = is_inside_frustum_screen(
-        p0_screen,
-        p1_screen,
-        p2_screen,
-        z0,
-        z1,
-        z2,
-        aabb.width,
-        aabb.height,
-    );
+fn is_triangle_visible(p0_screen: Vec3, p1_screen: Vec3, p2_screen: Vec3, aabb: BBox<f32>) -> bool {
+    let inside_frustum =
+        is_inside_frustum_screen(p0_screen, p1_screen, p2_screen, aabb.width, aabb.height);
 
     // Compute the normal `z` coordinate for backface culling
     let nz = {
@@ -290,7 +264,7 @@ fn is_triangle_visible(
         u.x * v.y - u.y * v.x
     };
 
-    inside_frustum && nz < 0
+    inside_frustum && nz < 0.0
 }
 
 #[inline(always)]

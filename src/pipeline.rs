@@ -1,14 +1,14 @@
-use std::simd::Simd;
-use std::sync::Arc;
-use std::{ops::Range, thread::JoinHandle};
+use std::{ops::Range, simd::Simd, sync::Arc, time::Duration};
 
 use rayon::prelude::*;
 
 use crate::{
-    common::{count_cycles, BBox},
+    common::count_cycles,
     config::CullingMode,
+    math::{BBox, Size},
     simd_config::{SimdColorGamma, SimdPixels, LANES},
     texture::BorrowedMutTexture,
+    vec::Vec2i,
     vert_buf::VertBuf,
     Attributes, AttributesSimd, FragmentShader, FragmentShaderImpl, FragmentShaderSimd, VertexBuf,
     VertexShader,
@@ -49,14 +49,19 @@ pub struct Pipeline<'a, B = &'a VertBuf> {
     metrics: Metrics,
     culling_mode: CullingMode,
     alpha_clip: Option<f32>,
-    workers: Vec<JoinHandle<()>>,
+    viewport: Size<usize>,
 }
 
 impl<'a, B> Pipeline<'a, B>
 where
     B: VertexBuf,
 {
-    pub fn new(vert_buf: B, index_buf: &'a [[usize; 3]], mode: PipelineMode) -> Self {
+    pub fn new(
+        vert_buf: B,
+        index_buf: &'a [[usize; 3]],
+        viewport: Size<usize>,
+        mode: PipelineMode,
+    ) -> Self {
         Pipeline {
             vert_buf,
             index_buf,
@@ -66,7 +71,7 @@ where
             metrics: Metrics::new(),
             culling_mode: CullingMode::BackFace,
             alpha_clip: None,
-            workers: Vec::new(),
+            viewport,
         }
     }
 
@@ -183,6 +188,13 @@ where
         self.culling_mode = culling_mode;
     }
 
+    fn viewport_f32(&self) -> Size<f32> {
+        Size {
+            width: self.viewport.width as f32,
+            height: self.viewport.height as f32,
+        }
+    }
+
     pub fn process_vertices<'b: 'a, V: VertexShader<B::Vertex>>(
         &'b mut self,
         vert_shader: &V,
@@ -195,9 +207,44 @@ where
             #[counter(self.metrics.performance_counters.vertex_processing)]
 
             (0..self.vert_buf.len())
-                .map(|i| process_vertex(self.vert_buf.index(i), vert_shader, &mut self.metrics))
+                .map(|i| process_vertex(self.vert_buf.index(i), vert_shader, self.viewport_f32(), &mut self.metrics))
                 .collect()
         };
+
+        println!("process vertices: {:?}", start.elapsed());
+
+        ProcessedVertices {
+            pipeline: self,
+            attributes,
+        }
+    }
+
+    pub fn process_vertices_par<'b: 'a, V>(
+        &'b mut self,
+        vert_shader: &V,
+    ) -> ProcessedVertices<'b, V::Output, B>
+    where
+        B: Sync,
+        V: Sync,
+        V: VertexShader<B::Vertex>,
+        V::Output: Send,
+    {
+        use crate::common::process_vertex;
+
+        let start = std::time::Instant::now();
+
+        let mut attributes = Vec::new();
+        count_cycles! {
+            #[counter(self.metrics.performance_counters.vertex_processing)]
+
+            (0..self.vert_buf.len())
+                .into_par_iter()
+                .map(|i| {
+                    let mut metrics = Metrics::new();
+                    process_vertex(self.vert_buf.index(i), vert_shader, self.viewport_f32(), &mut metrics)
+                })
+                .collect_into_vec(&mut attributes);
+        }
 
         println!("process vertices: {:?}", start.elapsed());
 
@@ -223,7 +270,6 @@ where
     Attr: Attributes + AttributesSimd<LANES> + Copy,
     B: VertexBuf,
 {
-    /*
     pub fn draw<Scalar, Simd>(
         &mut self,
         range: Range<usize>,
@@ -271,12 +317,21 @@ where
 
                 let color_buf = unsafe { color_buf.cast::<u32>() };
 
+                let bbox = BBox::new(
+                    Vec2i::zero(),
+                    Size::new(
+                        self.pipeline.viewport.width as i32,
+                        self.pipeline.viewport.height as i32,
+                    ),
+                );
+
                 draw_triangles(
                     &self.attributes,
                     &self.pipeline.index_buf[range],
                     frag_shader.unwrap_simd(),
                     color_buf,
                     depth_buf,
+                    bbox,
                     self.pipeline.culling_mode,
                     self.pipeline.alpha_clip,
                     &mut self.pipeline.metrics,
@@ -309,9 +364,8 @@ where
             }
         }
     }
-    */
 
-    pub fn draw_threaded<Scalar, Simd>(
+    pub fn draw_par<Scalar, Simd>(
         &mut self,
         range: Range<usize>,
         frag_shader: FragmentShaderImpl<Scalar, Simd>,
@@ -319,6 +373,7 @@ where
         Scalar: FragmentShader<Attr> + Sync,
         Simd: FragmentShaderSimd<Attr, LANES> + Sync,
         Attr: Sync,
+        B::Vertex: Attributes,
     {
         let color_buf = self
             .pipeline
@@ -350,140 +405,53 @@ where
 
             PipelineMode::Simd3D => {
                 use crate::prim3d::simd::draw_triangles;
-                let mut depth_buf = self
+                let depth_buf = self
                     .pipeline
                     .depth_buf
                     .as_mut()
                     .expect("no depth buffer")
                     .borrow_mut();
 
-                let mut color_buf = unsafe { color_buf.cast::<u32>() };
+                let color_buf = unsafe { color_buf.cast::<u32>() };
 
-                let bboxes: Arc<[BBox<f32>]> = vec![
-                    BBox {
-                        x: -1.,
-                        y: 1.,
-                        width: 2.,
-                        height: 2. / 3.,
-                    },
-                    BBox {
-                        x: 0.,
-                        y: 1.,
-                        width: 1.,
-                        height: 2. / 3.,
-                    },
-                    BBox {
-                        x: -1.,
-                        y: 1. - 2. / 3.,
-                        width: 2.,
-                        height: 2. / 3.,
-                    },
-                    BBox {
-                        x: 0.,
-                        y: 1. - 2. / 3.,
-                        width: 1.,
-                        height: 2. / 3.,
-                    },
-                    BBox {
-                        x: -1.,
-                        y: 1. - 4. / 3.,
-                        width: 2.,
-                        height: 2. / 3.,
-                    },
-                    BBox {
-                        x: 0.,
-                        y: 1. - 4. / 3.,
-                        width: 1.,
-                        height: 2. / 3.,
-                    },
-                ]
-                .into();
-                let n_tiles = bboxes.len();
+                let mut tiles = crate_tiles(Size::new(256, 256), color_buf, depth_buf);
+                let n_tiles = tiles.len();
                 let n_threads = std::thread::available_parallelism().unwrap().get();
 
-                let tile_init = || -> Vec<Vec<Vec<[usize; 3]>>> {
+                let bins_init = || -> Vec<Vec<Vec<[usize; 3]>>> {
                     (0..n_tiles)
                         .map(|_| Vec::with_capacity(n_threads))
                         .collect::<Vec<_>>()
                 };
 
                 let start = std::time::Instant::now();
+
+                // TODO: This is pretty bad... Ideally we would just send an index to `bin_triangles` that tells it which
+                // of the bins it can fill out for each tile based on the thread id. However, rust won't let that happen,
+                // as it can't prove that the mutable accesses won't overlap.
                 let mut bins = self.pipeline.index_buf[range.clone()]
                     .as_parallel_slice()
-                    .par_chunks((range.end - range.start) / n_threads)
-                    .map(|indices| bin_triangles(Arc::clone(&bboxes), &self.attributes, indices))
-                    .fold(tile_init, |mut acc, el| {
+                    .par_chunks(((range.end - range.start) / n_threads).max(1))
+                    .map(|indices| bin_triangles(&tiles, &self.attributes, indices))
+                    .fold(bins_init, |mut acc, el| {
                         for (acc, el) in acc.iter_mut().zip(el) {
                             acc.push(el);
                         }
                         acc
                     })
-                    .reduce(tile_init, |mut lhs, mut rhs| {
+                    // TODO: This isn't good. It's doing some needless O(n) operation. Find another way to merge the vecs.
+                    .reduce(bins_init, |mut lhs, mut rhs| {
                         for (lhs, rhs) in lhs.iter_mut().zip(rhs.iter_mut()) {
                             lhs.append(rhs);
                         }
                         lhs
                     });
 
-                println!("binning time: {:?}", start.elapsed());
+                for (tile, bin) in tiles.iter_mut().zip(&mut bins) {
+                    tile.bins = std::mem::take(bin);
+                }
 
-                let (mut cleft, mut cright) = color_buf.split_mut_vert(1280 / 2);
-
-                let (ctopleft, mut cmidleft) = cleft.split_mut_horz(720 / 3);
-                let (cmidleft, cbotleft) = cmidleft.split_mut_horz(720 / 3);
-
-                let (ctopright, mut cmidright) = cright.split_mut_horz(720 / 3);
-                let (cmidright, cbotright) = cmidright.split_mut_horz(720 / 3);
-
-                let (mut dleft, mut dright) = depth_buf.split_mut_vert(1280 / 2);
-
-                let (dtopleft, mut dmidleft) = dleft.split_mut_horz(720 / 3);
-                let (dmidleft, dbotleft) = dmidleft.split_mut_horz(720 / 3);
-
-                let (dtopright, mut dmidright) = dright.split_mut_horz(720 / 3);
-                let (dmidright, dbotright) = dmidright.split_mut_horz(720 / 3);
-
-                let tiles = vec![
-                    Tile {
-                        bbox: bboxes[0],
-                        color_buf: ctopleft,
-                        depth_buf: dtopleft,
-                        bins: std::mem::take(&mut bins[0]),
-                    },
-                    Tile {
-                        bbox: bboxes[1],
-                        color_buf: ctopright,
-                        depth_buf: dtopright,
-                        bins: std::mem::take(&mut bins[1]),
-                    },
-                    Tile {
-                        bbox: bboxes[2],
-                        color_buf: cmidleft,
-                        depth_buf: dmidleft,
-                        bins: std::mem::take(&mut bins[2]),
-                    },
-                    Tile {
-                        bbox: bboxes[3],
-                        color_buf: cmidright,
-                        depth_buf: dmidright,
-                        bins: std::mem::take(&mut bins[3]),
-                    },
-                    Tile {
-                        bbox: bboxes[4],
-                        color_buf: cbotleft,
-                        depth_buf: dbotleft,
-                        bins: std::mem::take(&mut bins[4]),
-                    },
-                    Tile {
-                        bbox: bboxes[5],
-                        color_buf: cbotright,
-                        depth_buf: dbotright,
-                        bins: std::mem::take(&mut bins[5]),
-                    },
-                ];
-
-                let width = 1280;
-                let height = 720;
+                self.pipeline.metrics.binning_time.count(start.elapsed());
 
                 let frag_shader = frag_shader.unwrap_simd();
                 let metrics = tiles
@@ -497,13 +465,11 @@ where
                                 frag_shader,
                                 tile.color_buf.borrow_mut(),
                                 tile.depth_buf.borrow_mut(),
-                                width,
-                                height,
                                 BBox {
-                                    x: (tile.bbox.x * width as f32 / 2. + width as f32 / 2.) as i32,
-                                    y: (-tile.bbox.y * height as f32 / 2. + height as f32 / 2.) as i32,
-                                    width: (tile.bbox.width * width as f32 / 2.) as i32,
-                                    height: (tile.bbox.height * height as f32 / 2.) as i32,
+                                    x: tile.bbox.x as i32,
+                                    y: tile.bbox.y as i32,
+                                    width: tile.bbox.width as i32,
+                                    height: tile.bbox.height as i32,
                                 },
                                 self.pipeline.culling_mode,
                                 self.pipeline.alpha_clip,
@@ -566,7 +532,7 @@ pub struct Tile<'a> {
 }
 
 fn bin_triangles<'a, Attr>(
-    tiles: Arc<[BBox<f32>]>,
+    tiles: &'a [Tile],
     attributes: &'a [Attr],
     indices: &'a [[usize; 3]],
 ) -> Vec<Vec<[usize; 3]>>
@@ -590,12 +556,12 @@ where
 
         let tri_bbox = BBox {
             x: min.x,
-            y: max.y,
+            y: min.y,
             width: max.x - min.x,
             height: max.y - min.y,
         };
         for (index, tile) in tiles.iter().enumerate() {
-            if tile.intersects(tri_bbox) {
+            if tile.bbox.intersects(tri_bbox) {
                 processed[index].push([ix0, ix1, ix2]);
             }
         }
@@ -604,12 +570,91 @@ where
     processed
 }
 
-#[derive(Default, Debug, Clone, Copy)]
+fn crate_tiles<'a>(
+    tile_size: Size<usize>,
+    color_buf: BorrowedMutTexture<'a, u32>,
+    depth_buf: BorrowedMutTexture<'a, f32>,
+) -> Vec<Tile<'a>> {
+    let color_tiles = tile_texture_sized(tile_size, color_buf);
+    let depth_tiles = tile_texture_sized(tile_size, depth_buf);
+
+    color_tiles
+        .zip(depth_tiles)
+        .map(|((color_buf, color_bbox), (depth_buf, depth_bbox))| {
+            assert_eq!(color_bbox, depth_bbox);
+            Tile {
+                bbox: BBox {
+                    x: color_bbox.x as f32,
+                    y: color_bbox.y as f32,
+                    width: color_bbox.width as f32,
+                    height: color_bbox.height as f32,
+                },
+                color_buf,
+                depth_buf,
+                bins: Vec::new(),
+            }
+        })
+        .collect()
+}
+
+fn tile_texture_sized<'a, T>(
+    size: Size<usize>,
+    tex: BorrowedMutTexture<'a, T>,
+) -> impl Iterator<Item = (BorrowedMutTexture<'a, T>, BBox<usize>)> {
+    let full_tiles_width = tex.width() / size.width;
+    let remainder_tile_width = tex.width() % size.width;
+    let full_tiles_height = tex.height() / size.height;
+    let remainder_tile_height = tex.height() % size.height;
+    let tile_widths = std::iter::repeat(size.width)
+        .take(full_tiles_width)
+        .chain((remainder_tile_width != 0).then_some(remainder_tile_width));
+    let tile_heights = std::iter::repeat(size.height)
+        .take(full_tiles_height)
+        .chain((remainder_tile_height != 0).then_some(remainder_tile_height));
+    tile_texture(tile_widths, tile_heights, tex)
+}
+
+fn tile_texture<'a, T>(
+    tile_widths: impl IntoIterator<Item = usize>,
+    tile_heights: impl IntoIterator<Item = usize> + Clone,
+    tex: BorrowedMutTexture<'a, T>,
+) -> impl Iterator<Item = (BorrowedMutTexture<'a, T>, BBox<usize>)> {
+    tile_widths
+        .into_iter()
+        .scan((tex, 0), move |(rest_horz, x), width| {
+            let (tile_horz, tail) = rest_horz.split_mut_vert(width);
+            let curr_x = *x;
+            *rest_horz = tail;
+            *x += width;
+            Some(tile_heights.clone().into_iter().scan(
+                (tile_horz, 0),
+                move |(rest_vert, y), height| {
+                    let (tile, tail) = rest_vert.split_mut_horz(height);
+                    let curr_y = *y;
+                    *rest_vert = tail;
+                    *y += height;
+                    Some((
+                        tile,
+                        BBox {
+                            x: curr_x,
+                            y: curr_y,
+                            width,
+                            height,
+                        },
+                    ))
+                },
+            ))
+        })
+        .flatten()
+}
+
+#[derive(Debug, Clone, Copy)]
 pub struct Metrics {
     pub triangles_drawn: usize,
     pub backfaces_culled: usize,
     pub behind_culled: usize,
     pub sum_areas: i64,
+    pub binning_time: TimeCounter,
     #[cfg(feature = "performance-counters")]
     pub performance_counters: perf_counters::PerformanceCounters,
 }
@@ -621,6 +666,7 @@ impl Metrics {
             backfaces_culled: 0,
             behind_culled: 0,
             sum_areas: 0,
+            binning_time: TimeCounter::new("binning time"),
             #[cfg(feature = "performance-counters")]
             performance_counters: Default::default(),
         }
@@ -639,8 +685,23 @@ impl Metrics {
         self.backfaces_culled = 0;
         self.behind_culled = 0;
         self.sum_areas = 0;
+        self.binning_time.clear();
         #[cfg(feature = "performance-counters")]
         self.performance_counters.clear();
+    }
+}
+
+impl Default for Metrics {
+    fn default() -> Self {
+        Self {
+            triangles_drawn: Default::default(),
+            backfaces_culled: Default::default(),
+            behind_culled: Default::default(),
+            sum_areas: Default::default(),
+            binning_time: TimeCounter::new("binning time"),
+            #[cfg(feature = "performance-counters")]
+            performance_counters: Default::default(),
+        }
     }
 }
 
@@ -651,6 +712,7 @@ impl std::fmt::Display for Metrics {
             backfaces_culled,
             behind_culled,
             sum_areas,
+            binning_time,
             #[cfg(feature = "performance-counters")]
             performance_counters,
         } = self;
@@ -658,6 +720,7 @@ impl std::fmt::Display for Metrics {
         writeln!(f, "\ttriangles drawn: {triangles_drawn}")?;
         writeln!(f, "\tbackfaces culled: {backfaces_culled}")?;
         writeln!(f, "\tbehind culled: {behind_culled}")?;
+        writeln!(f, "\t{binning_time}",)?;
         let mean_area = sum_areas as f64 / (2. * triangles_drawn as f64);
         writeln!(f, "\tmean triangle area: {mean_area:.2}")?;
         #[cfg(feature = "performance-counters")]
@@ -666,18 +729,69 @@ impl std::fmt::Display for Metrics {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct TimeCounter {
+    pub name: &'static str,
+    pub hits: u64,
+    pub total_time: Duration,
+}
+
+impl TimeCounter {
+    pub fn new(name: &'static str) -> Self {
+        TimeCounter {
+            name: name,
+            hits: 0,
+            total_time: Duration::ZERO,
+        }
+    }
+
+    pub fn count(&mut self, time: Duration) {
+        self.hits += 1;
+        self.total_time += time;
+    }
+
+    pub fn merge(&mut self, other: TimeCounter) {
+        self.hits += other.hits;
+        self.total_time += other.total_time;
+    }
+
+    pub fn clear(&mut self) {
+        self.hits = 0;
+        self.total_time = Duration::ZERO;
+    }
+}
+
+impl std::fmt::Display for TimeCounter {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        let &TimeCounter {
+            name,
+            hits,
+            total_time,
+        } = self;
+        if hits > 0 {
+            let t_per_hit = total_time / hits as u32;
+            write!(
+                f,
+                "{name}: {hits} hits, {total_time:?} total time, {t_per_hit:.2?} time/hit"
+            )
+        } else {
+            write!(f, "{name}: -")
+        }
+    }
+}
+
 #[cfg(feature = "performance-counters")]
 mod perf_counters {
     #[derive(Debug, Clone, Copy)]
-    pub struct Counter {
+    pub struct CycleCounter {
         pub name: &'static str,
         pub hits: u64,
         pub cycles: u64,
     }
 
-    impl Counter {
+    impl CycleCounter {
         pub fn new(name: &'static str) -> Self {
-            Counter {
+            CycleCounter {
                 name,
                 hits: 0,
                 cycles: 0,
@@ -695,9 +809,9 @@ mod perf_counters {
         }
     }
 
-    impl std::fmt::Display for Counter {
+    impl std::fmt::Display for CycleCounter {
         fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-            let &Counter { name, hits, cycles } = self;
+            let &CycleCounter { name, hits, cycles } = self;
             if hits > 0 {
                 let cy_per_hit = cycles as f64 / hits as f64;
                 write!(
@@ -719,13 +833,13 @@ mod perf_counters {
 
             #[derive(Debug, Clone, Copy)]
             pub struct $struct_name {
-                $(pub $name: Counter,)*
+                $(pub $name: CycleCounter,)*
             }
 
             impl Default for $struct_name {
                 fn default() -> Self {
                     $struct_name {
-                        $($name: Counter::new(stringify!($name)),)*
+                        $($name: CycleCounter::new(stringify!($name)),)*
                     }
                 }
             }

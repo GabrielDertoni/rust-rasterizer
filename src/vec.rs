@@ -4,8 +4,6 @@ use std::ops::{
 };
 use std::simd::{LaneCount, Simd, SimdElement, SimdFloat, SimdOrd, StdFloat, SupportedLaneCount};
 
-use serde::de::value;
-
 use crate::{IntoSimd, StructureOfArray};
 
 pub type Mat3x3 = Mat<f32, 3, 3>;

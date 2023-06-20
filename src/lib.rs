@@ -23,6 +23,7 @@ pub mod texture;
 pub mod utils;
 pub mod vec;
 pub mod math_utils;
+pub mod math;
 
 // TODO: Move to separate crate
 // pub mod frag_shaders;

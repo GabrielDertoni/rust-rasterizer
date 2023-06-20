@@ -24,6 +24,7 @@ use rasterization::{
     config::{Light, Scene, RenderingConfig, RasterizerConfig, RasterizerImplementation},
     pipeline::PipelineMode,
     FragmentShaderSimd,
+    math::Size,
 };
 
 struct Model {
@@ -206,7 +207,6 @@ impl World {
 
         if self.enable_logging {
             println!("render time: {:?}", self.fps_counter.mean_time());
-            println!("FPS: {}", self.fps_counter.mean_fps());
         }
     }
 
@@ -224,7 +224,12 @@ impl World {
         let camera_transform = self.camera.transform_matrix(self.rendering_cfg.near, self.rendering_cfg.far);
 
         let vert_shader = shaders::textured::TexturedVertexShader::new(camera_transform);
-        let mut pipeline = Pipeline::new(&self.vert_buf, &self.index_buf, PipelineMode::Simd3D);
+        let mut pipeline = Pipeline::new(
+            &self.vert_buf,
+            &self.index_buf,
+            Size::new(self.rendering_cfg.width, self.rendering_cfg.height),
+            PipelineMode::Simd3D,
+        );
 
         pipeline
             .with_alpha_clip(self.rendering_cfg.alpha_clip)
@@ -237,7 +242,7 @@ impl World {
 
         pipeline.set_color_buffer(pixels);
         pipeline.set_depth_buffer(depth_buf);
-        let mut pipeline = pipeline.process_vertices(&vert_shader);
+        let mut pipeline = pipeline.process_vertices_par(&vert_shader);
 
         let start = std::time::Instant::now();
         for model in &self.models {
@@ -251,7 +256,8 @@ impl World {
                 );
                 let frag_shader = shaders::textured::TexturedFragmentShader::new(texture);
     
-                pipeline.draw_threaded(subset.range.clone(), FragmentShaderSimd::<_, 8>::simd_impl(&frag_shader));
+                pipeline.draw_par(subset.range.clone(), FragmentShaderSimd::<_, 8>::simd_impl(&frag_shader));
+                // pipeline.draw(subset.range.clone(), FragmentShaderSimd::<_, 4>::simd_impl(&frag_shader));
             }
         }
         println!("time to render models: {:?}", start.elapsed());
@@ -284,6 +290,7 @@ fn main() -> anyhow::Result<()> {
         Pixels::new(scene.rendering.width as u32, scene.rendering.height as u32, surface_texture).unwrap()
     };
 
+    let fps = scene.rendering.fps;
     let mut world = World::new(scene, scene_path.parent().unwrap().to_owned())?;
 
     let event_loop_sender = event_loop.create_proxy();
@@ -298,9 +305,21 @@ fn main() -> anyhow::Result<()> {
     let core_id = core_affinity::get_core_ids().unwrap()[0];
     core_affinity::set_for_current(core_id);
 
+    let target_render_time = fps.map(|fps| Duration::from_secs_f32(1. / fps));
+
+    let mut next_frame = Instant::now();
+
     let mut start = Instant::now();
     event_loop.run(move |event, _, control_flow| {
-        control_flow.set_poll();
+        if target_render_time.is_some() {
+            if next_frame < Instant::now() {
+                window.request_redraw();
+            } else {
+                control_flow.set_wait_until(next_frame);
+            }
+        } else {
+            control_flow.set_poll();
+        }
 
         if window.has_focus() {
             window
@@ -361,13 +380,24 @@ fn main() -> anyhow::Result<()> {
                 _ => (),
             },
             Event::MainEventsCleared => {
+                if target_render_time.is_none() {
+                    window.request_redraw()
+                }
+            }
+            Event::RedrawRequested(_) => {
                 let dt = start.elapsed();
                 start = Instant::now();
+
                 world.render(pixels.frame_mut(), dt);
-                // std::thread::sleep(std::time::Duration::from_millis(200));
-                window.request_redraw()
+                pixels.render().unwrap();
+
+                println!("FPS: {:.1}", 1. / dt.as_secs_f32());
+
+                if let Some(target_render_time) = target_render_time {
+                    next_frame = start + target_render_time;
+                    control_flow.set_wait_until(next_frame);
+                }
             }
-            Event::RedrawRequested(_) => pixels.render().unwrap(),
             Event::DeviceEvent {
                 event: DeviceEvent::MouseMotion { delta: (dx, dy) },
                 ..

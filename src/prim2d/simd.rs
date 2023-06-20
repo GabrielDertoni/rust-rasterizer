@@ -1,7 +1,8 @@
-use std::simd::{Mask, Simd, SimdFloat, SimdPartialOrd};
+use std::simd::{Mask, Simd, SimdPartialOrd};
 
 use crate::{
-    common::{count_cycles, ndc_to_screen, orient_2d, BBox},
+    common::{count_cycles, ndc_to_screen, orient_2d},
+    math::BBox,
     pipeline::Metrics,
     simd_config::*,
     texture::BorrowedMutTexture,

@@ -1,6 +1,6 @@
 use crate::{
     VertexShader, Attributes,
-    vec::{Vec, Vec2i, Vec2, Vec3, Vec4, Num}, pipeline::Metrics,
+    vec::{Vec, Vec2i, Vec2, Vec3, Vec4, Num}, pipeline::Metrics, math::Size,
 };
 
 
@@ -34,29 +34,17 @@ macro_rules! count_cycles {
 
 pub(crate) use count_cycles;
 
-#[derive(Clone, Copy, Debug)]
-pub struct BBox<T> {
-    pub x: T,
-    pub y: T,
-    pub width: T,
-    pub height: T,
-}
-
-impl<T: Num + PartialOrd> BBox<T> {
-    pub fn intersects(&self, other: BBox<T>) -> bool {
-        // let x_intersection = Num::min(self.x + self.width, other.x + other.width) - Num::max(self.x, other.x);
-        // let y_intersection = Num::min(self.y + self.height, other.y + other.height) - Num::max(self.y, other.y);
-        // x_intersection > T::zero() && y_intersection > T::zero()
-        let x_intersection = Num::min(self.x + self.width, other.x + other.width) - Num::max(self.x, other.x);
-        let y_intersection = Num::min(self.y, other.y) - Num::max(self.y - self.height, other.y - other.height);
-        x_intersection >= T::zero() && y_intersection >= T::zero()
-    }
-}
-
 pub fn ndc_to_screen(ndc: Vec2, width: f32, height: f32) -> Vec2 {
     Vec2::from([
         ndc.x * width / 2. + width / 2.,
         -ndc.y * height / 2. + height / 2.,
+    ])
+}
+
+pub fn ndc_to_viewport(ndc: Vec2, viewport: Size<f32>) -> Vec2 {
+    Vec2::from([
+        ndc.x * viewport.width / 2. + viewport.width / 2.,
+        -ndc.y * viewport.height / 2. + viewport.height / 2.,
     ])
 }
 
@@ -98,24 +86,21 @@ pub fn is_inside_frustum_clip(p0_clip: Vec4, p1_clip: Vec4, p2_clip: Vec4) -> bo
 }
 
 pub fn is_inside_frustum_screen(
-    p0_screen: Vec2i,
-    p1_screen: Vec2i,
-    p2_screen: Vec2i,
-    z0: f32,
-    z1: f32,
-    z2: f32,
-    width: i32,
-    height: i32,
+    p0_screen: Vec3,
+    p1_screen: Vec3,
+    p2_screen: Vec3,
+    width: f32,
+    height: f32,
 ) -> bool {
-    ((0..width).contains(&p0_screen.x)
-        && (0..height).contains(&p0_screen.y)
-        && (-1.0..1.0).contains(&z0))
-        || ((0..width).contains(&p1_screen.x)
-            && (0..height).contains(&p1_screen.y)
-            && (-1.0..1.0).contains(&z1))
-        || ((0..width).contains(&p2_screen.x)
-            && (0..height).contains(&p2_screen.y)
-            && (-1.0..1.0).contains(&z2))
+    ((0.0..width).contains(&p0_screen.x)
+        && (0.0..height).contains(&p0_screen.y)
+        && (-1.0..1.0).contains(&p0_screen.z))
+        || ((0.0..width).contains(&p1_screen.x)
+            && (0.0..height).contains(&p1_screen.y)
+            && (-1.0..1.0).contains(&p1_screen.z))
+        || ((0.0..width).contains(&p2_screen.x)
+            && (0.0..height).contains(&p2_screen.y)
+            && (-1.0..1.0).contains(&p2_screen.z))
 }
 
 pub fn is_inside_frustum(p0_ndc: Vec3, p1_ndc: Vec3, p2_ndc: Vec3) -> bool {
@@ -130,7 +115,7 @@ pub fn is_inside_frustum(p0_ndc: Vec3, p1_ndc: Vec3, p2_ndc: Vec3) -> bool {
             && (-1.0..1.0).contains(&p2_ndc.z))
 }
 
-pub fn process_vertex<Vert, V>(v: Vert, vert_shader: &V, metrics: &mut Metrics) -> V::Output
+pub fn process_vertex<Vert, V>(v: Vert, vert_shader: &V, viewport: Size<f32>, metrics: &mut Metrics) -> V::Output
 where
     V: VertexShader<Vert>,
 {
@@ -141,6 +126,7 @@ where
         let pos = out.position_mut();
         let inv_w = 1. / pos.w;
         *pos.xyz_mut() *= inv_w;
+        *pos.xy_mut() = ndc_to_viewport(pos.xy(), viewport);
         pos.w = inv_w;
         out
     }
