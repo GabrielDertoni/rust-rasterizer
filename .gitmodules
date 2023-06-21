@@ -1,0 +1,3 @@
+[submodule "examples/scene/submodules/egui-gizmo"]
+	path = examples/scene/submodules/egui-gizmo
+	url = https://github.com/GabrielDertoni/egui-gizmo
