@@ -1,4 +1,4 @@
-use std::{ops::Range, simd::Simd, sync::Arc, time::Duration};
+use std::{ops::Range, simd::Simd, time::Duration};
 
 use rayon::prelude::*;
 
@@ -195,18 +195,20 @@ where
         }
     }
 
-    pub fn process_vertices<'b: 'a, V: VertexShader<B::Vertex>>(
-        &'b mut self,
+    pub fn process_vertices<'pipeline, V: VertexShader<B::Vertex>>(
+        &'pipeline mut self,
         vert_shader: &V,
-    ) -> ProcessedVertices<'b, V::Output, B> {
+        vertex_range: Option<Range<usize>>,
+    ) -> ProcessedVertices<'pipeline, 'a, V::Output, B> {
         use crate::common::process_vertex;
 
+        let vertex_range = vertex_range.unwrap_or(0..self.vert_buf.len());
         let start = std::time::Instant::now();
 
         let attributes = count_cycles! {
             #[counter(self.metrics.performance_counters.vertex_processing)]
 
-            (0..self.vert_buf.len())
+            vertex_range.clone()
                 .map(|i| process_vertex(self.vert_buf.index(i), vert_shader, self.viewport_f32(), &mut self.metrics))
                 .collect()
         };
@@ -215,14 +217,16 @@ where
 
         ProcessedVertices {
             pipeline: self,
+            vertex_range,
             attributes,
         }
     }
 
-    pub fn process_vertices_par<'b: 'a, V>(
-        &'b mut self,
+    pub fn process_vertices_par<'pipeline, V>(
+        &'pipeline mut self,
         vert_shader: &V,
-    ) -> ProcessedVertices<'b, V::Output, B>
+        vertex_range: Option<Range<usize>>,
+    ) -> ProcessedVertices<'pipeline, 'a, V::Output, B>
     where
         B: Sync,
         V: Sync,
@@ -231,13 +235,14 @@ where
     {
         use crate::common::process_vertex;
 
+        let vertex_range = vertex_range.unwrap_or(0..self.vert_buf.len());
         let start = std::time::Instant::now();
 
         let mut attributes = Vec::new();
         count_cycles! {
             #[counter(self.metrics.performance_counters.vertex_processing)]
 
-            (0..self.vert_buf.len())
+            vertex_range.clone()
                 .into_par_iter()
                 .map(|i| {
                     let mut metrics = Metrics::new();
@@ -246,10 +251,11 @@ where
                 .collect_into_vec(&mut attributes);
         }
 
-        println!("process vertices: {:?}", start.elapsed());
+        self.metrics.vertex_processing_time.count(start.elapsed());
 
         ProcessedVertices {
             pipeline: self,
+            vertex_range,
             attributes,
         }
     }
@@ -258,14 +264,19 @@ where
         self.take_color_buffer();
         self.take_depth_buffer();
     }
+
+    pub fn get_metrics(&self) -> Metrics {
+        self.metrics
+    }
 }
 
-pub struct ProcessedVertices<'a, Attr, B = &'a VertBuf> {
-    pipeline: &'a mut Pipeline<'a, B>,
+pub struct ProcessedVertices<'pipeline, 'a, Attr, B = &'a VertBuf> {
+    pipeline: &'pipeline mut Pipeline<'a, B>,
+    vertex_range: Range<usize>,
     attributes: Vec<Attr>,
 }
 
-impl<'a, Attr, B> ProcessedVertices<'a, Attr, B>
+impl<'pipeline, 'a, Attr, B> ProcessedVertices<'pipeline, 'a, Attr, B>
 where
     Attr: Attributes + AttributesSimd<LANES> + Copy,
     B: VertexBuf,
@@ -288,6 +299,7 @@ where
         match self.pipeline.mode {
             PipelineMode::Basic3D => {
                 use crate::prim3d::draw_triangles;
+
                 let depth_buf = self
                     .pipeline
                     .depth_buf
@@ -308,6 +320,7 @@ where
 
             PipelineMode::Simd3D => {
                 use crate::prim3d::simd::draw_triangles;
+
                 let depth_buf = self
                     .pipeline
                     .depth_buf
@@ -328,6 +341,7 @@ where
                 draw_triangles(
                     &self.attributes,
                     &self.pipeline.index_buf[range],
+                    self.vertex_range.clone(),
                     frag_shader.unwrap_simd(),
                     color_buf,
                     depth_buf,
@@ -432,7 +446,7 @@ where
                 let mut bins = self.pipeline.index_buf[range.clone()]
                     .as_parallel_slice()
                     .par_chunks(((range.end - range.start) / n_threads).max(1))
-                    .map(|indices| bin_triangles(&tiles, &self.attributes, indices))
+                    .map(|indices| bin_triangles(&tiles, &self.attributes, indices, self.vertex_range.clone()))
                     .fold(bins_init, |mut acc, el| {
                         for (acc, el) in acc.iter_mut().zip(el) {
                             acc.push(el);
@@ -462,6 +476,7 @@ where
                             draw_triangles(
                                 &self.attributes,
                                 &bin,
+                                self.vertex_range.clone(),
                                 frag_shader,
                                 tile.color_buf.borrow_mut(),
                                 tile.depth_buf.borrow_mut(),
@@ -516,7 +531,7 @@ where
     }
 
     pub fn get_metrics(&self) -> Metrics {
-        self.pipeline.metrics
+        self.pipeline.get_metrics()
     }
 
     pub fn finalize(&mut self) {
@@ -535,6 +550,7 @@ fn bin_triangles<'a, Attr>(
     tiles: &'a [Tile],
     attributes: &'a [Attr],
     indices: &'a [[usize; 3]],
+    vertex_range: Range<usize>,
 ) -> Vec<Vec<[usize; 3]>>
 where
     Attr: Attributes,
@@ -547,9 +563,9 @@ where
             .collect();
 
     for &[ix0, ix1, ix2] in indices {
-        let v0 = attributes[ix0].position().xy();
-        let v1 = attributes[ix1].position().xy();
-        let v2 = attributes[ix2].position().xy();
+        let v0 = attributes[ix0 - vertex_range.start].position().xy();
+        let v1 = attributes[ix1 - vertex_range.start].position().xy();
+        let v2 = attributes[ix2 - vertex_range.start].position().xy();
 
         let min = v0.min(v1).min(v2);
         let max = v0.max(v1).max(v2);
@@ -679,7 +695,8 @@ impl Metrics {
         self.backfaces_culled += other.backfaces_culled;
         self.sum_areas += other.sum_areas;
         self.binning_time.merge(other.binning_time);
-        self.vertex_processing_time.merge(other.vertex_processing_time);
+        self.vertex_processing_time
+            .merge(other.vertex_processing_time);
         #[cfg(feature = "performance-counters")]
         self.performance_counters.merge(other.performance_counters);
     }

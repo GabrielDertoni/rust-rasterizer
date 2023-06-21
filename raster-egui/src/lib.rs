@@ -8,6 +8,7 @@ use egui_winit::winit::{
     event_loop::EventLoop,
     window::{Window, WindowBuilder},
 };
+use egui_winit::egui;
 use pixels::{Pixels, SurfaceTexture};
 
 use painter::Painter;
@@ -103,7 +104,6 @@ pub struct Context {
     painter: Painter,
     egui_ctx: egui::Context,
     io_state: egui_winit::State,
-    wsize: PhysicalSize<u32>,
 }
 
 impl Context {
@@ -112,7 +112,6 @@ impl Context {
             painter: Painter::new(),
             egui_ctx,
             io_state: egui_winit::State::new(&window),
-            wsize: window.inner_size(),
         }
     }
 
@@ -129,7 +128,6 @@ impl Context {
                 event: WindowEvent::Resized(newsize),
                 ..
             } => {
-                self.wsize = newsize;
                 Response {
                     consumed: false,
                     cmd: Some(Cmd::Resize(newsize)),

@@ -11,9 +11,7 @@ performance-counters = ["rasterization/performance-counters"]
 
 [dependencies]
 rasterization = { path = "..", default-features = false }
-egui = "0.22"
-epaint = "0.22"
+egui-winit = "0.22"
 pixels = "0.12"
 # TODO: remove this
 image = "0.24.6"
-egui-winit = "0.22.0"

@@ -1,4 +1,4 @@
-use std::simd::{Simd, SimdPartialOrd};
+use std::{simd::{Simd, SimdPartialOrd}, ops::Range};
 
 use crate::{
     common::*,
@@ -14,6 +14,7 @@ use crate::{
 pub fn draw_triangles<Attr, S>(
     attr: &[Attr],
     tris: &[[usize; 3]],
+    vertex_range: Range<usize>,
     frag_shader: &S,
     mut color_buf: BorrowedMutTexture<u32>,
     mut depth_buf: BorrowedMutTexture<f32>,
@@ -33,9 +34,9 @@ pub fn draw_triangles<Attr, S>(
             CullingMode::BackFace => (v2, v1, v0),
             CullingMode::Disabled => {
                 let sign = orient_2d(
-                    attr[v0].position().xy(),
-                    attr[v1].position().xy(),
-                    attr[v2].position().xy(),
+                    attr[v0 - vertex_range.start].position().xy(),
+                    attr[v1 - vertex_range.start].position().xy(),
+                    attr[v2 - vertex_range.start].position().xy(),
                 );
                 if sign > 0.0 {
                     (v0, v1, v2)
@@ -45,9 +46,9 @@ pub fn draw_triangles<Attr, S>(
             }
         };
 
-        let v0 = attr[v0];
-        let v1 = attr[v1];
-        let v2 = attr[v2];
+        let v0 = attr[v0 - vertex_range.start];
+        let v1 = attr[v1 - vertex_range.start];
+        let v2 = attr[v2 - vertex_range.start];
 
         let inside_frustum = (-1.0..1.0).contains(&v0.position().z)
             && (-1.0..1.0).contains(&v1.position().z)

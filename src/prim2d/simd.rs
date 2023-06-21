@@ -1,13 +1,14 @@
-use std::simd::{Mask, Simd, SimdPartialOrd};
+use std::simd::{Simd, SimdPartialOrd};
 
 use crate::{
-    common::{count_cycles, ndc_to_screen, orient_2d},
+    common::{count_cycles, orient_2d},
     math::BBox,
+    math_utils::{simd_clamp01, simd_rgb_to_srgb, simd_srgb_to_rgb},
     pipeline::Metrics,
     simd_config::*,
     texture::BorrowedMutTexture,
     vec::{Vec, Vec2i},
-    Attributes, AttributesSimd, FragmentShaderSimd, IntoSimd, math_utils::simd_clamp01,
+    Attributes, AttributesSimd, FragmentShaderSimd, IntoSimd,
 };
 
 pub fn draw_triangles<Attr, S>(
@@ -35,9 +36,9 @@ pub fn draw_triangles<Attr, S>(
                 attr[v2].position().xy(),
             );
             if sign > 0.0 {
-                (v2, v1, v0)
-            } else {
                 (v0, v1, v2)
+            } else {
+                (v2, v1, v0)
             }
         };
 
@@ -70,52 +71,33 @@ fn draw_triangle<VertOut, S>(
     S: FragmentShaderSimd<VertOut, LANES>,
 {
     let stride = pixels.indexer().stride();
-    let width = pixels.width() as i32;
-    let height = pixels.height() as i32;
     let pixels = pixels.as_slice_mut();
 
     let p0_ndc = *v0.position();
     let p1_ndc = *v1.position();
     let p2_ndc = *v2.position();
 
-    let p0_screen = ndc_to_screen(p0_ndc.xy(), width as f32, height as f32).to_i32();
-    let p1_screen = ndc_to_screen(p1_ndc.xy(), width as f32, height as f32).to_i32();
-    let p2_screen = ndc_to_screen(p2_ndc.xy(), width as f32, height as f32).to_i32();
+    let p0i = p0_ndc.xy().to_i32();
+    let p1i = p1_ndc.xy().to_i32();
+    let p2i = p2_ndc.xy().to_i32();
 
-    let mut min = p0_screen.min(p1_screen).min(p2_screen);
+    let mut min = p0i.min(p1i).min(p2i);
     min.x = min.x.next_multiple_of(-(LANES as i32)).max(aabb.x);
     min.y = min.y.max(aabb.y);
-    let max = p0_screen.max(p1_screen).max(p2_screen).min(Vec2i::from([
+    let max = p0i.max(p1i).max(p2i).min(Vec2i::from([
         aabb.x + aabb.width - STEP_X,
         aabb.y + aabb.height - STEP_Y,
     ]));
 
     // 2 times the area of the triangle
-    let tri_area = orient_2d(p0_screen, p1_screen, p2_screen);
-
-    let nz = {
-        let u = p0_screen - p1_screen;
-        let v = p2_screen - p1_screen;
-        u.x * v.y - u.y * v.x
-    };
-
-    // let inside_frustum = is_inside_frustum(p0_ndc.xyz(), p1_ndc.xyz(), p2_ndc.xyz());
-    let inside_frustum = (p0_ndc.z >= -1. || p1_ndc.z >= -1. || p2_ndc.z >= -1.)
-        && (p0_ndc.z <= 1. && p1_ndc.z <= 1. && p2_ndc.z <= 1.);
-
-    if tri_area <= 0 || nz >= 0 || !inside_frustum || min.x == max.x || min.y == max.y {
-        if !inside_frustum {
-            metrics.behind_culled += 1;
-        }
-        if nz >= 0 {
-            metrics.backfaces_culled += 1;
-        }
+    let tri_area = orient_2d(p0i, p1i, p2i);
+    if tri_area <= 0 {
         return;
     }
 
-    let (w0_inc, mut w0_row) = orient_2d_step(p1_screen, p2_screen, min);
-    let (w1_inc, mut w1_row) = orient_2d_step(p2_screen, p0_screen, min);
-    let (w2_inc, mut w2_row) = orient_2d_step(p0_screen, p1_screen, min);
+    let (w0_inc, mut w0_row) = orient_2d_step(p1i, p2i, min);
+    let (w1_inc, mut w1_row) = orient_2d_step(p2i, p0i, min);
+    let (w2_inc, mut w2_row) = orient_2d_step(p0i, p1i, min);
 
     let inv_area = Simd::splat(1.0 / tri_area as f32);
 
@@ -141,11 +123,11 @@ fn draw_triangle<VertOut, S>(
 
                         let interp = AttributesSimd::interpolate(&v0, &v1, &v2, w);
                         let simd_pixels =
-                            unsafe { &mut *(&mut pixels[idx] as *mut u32).cast::<Simd<u32, LANES>>() };
-                        let pixel_coords = Vec::from([Simd::splat(x), Simd::splat(y)]) + Vec::from([X_OFF, Y_OFF]);
+                            unsafe { &mut *(&mut pixels[idx] as *mut u32).cast::<SimdColorGamma>() };
 
-                        let frag_color = frag_shader.exec(mask, pixel_coords, interp);
-                        blend_pixels(frag_color, mask, simd_pixels);
+                        let pixel_coords = Vec::from([Simd::splat(x), Simd::splat(y)]) + Vec::from([X_OFF, Y_OFF]);
+                        let frag_output = frag_shader.exec(mask, pixel_coords, interp);
+                        blend_pixels(frag_output, mask, simd_pixels);
                     }
                 }
             }
@@ -169,15 +151,17 @@ fn draw_triangle<VertOut, S>(
 }
 
 #[inline(always)]
-fn blend_pixels(frag_output: SimdVec4, mask: Mask<i32, LANES>, pixels: &mut Simd<u32, LANES>) {
+fn blend_pixels(
+    frag_output: SimdVec4,
+    mask: SimdMask,
+    pixels: &mut SimdColorGamma,
+) {
+    let prev_color_linear = simd_srgb_to_rgb(pixels.xyz());
     let alpha = frag_output.w;
-    let frag_output =
-        frag_output.map(|chan| (simd_clamp01(chan) * Simd::splat(255.)).cast::<u32>());
-    let colors = frag_output.x
-        | (frag_output.y << Simd::splat(8))
-        | (frag_output.z << Simd::splat(16))
-        | (frag_output.w << Simd::splat(24));
-    *pixels = mask.select(colors, *pixels);
+    let blended_linear = frag_output.xyz() * alpha + prev_color_linear * (Simd::splat(1.) - alpha);
+    let blended_srgb = simd_rgb_to_srgb(blended_linear.map(simd_clamp01));
+
+    *pixels.xyz_mut() = blended_srgb.zip_with(pixels.xyz(), |c, p| mask.cast().select(c, p));
 }
 
 #[inline(always)]

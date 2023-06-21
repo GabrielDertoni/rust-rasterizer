@@ -40,3 +40,6 @@ pub type SimdMask = Mask<i32, LANES>;
 pub type SimdPixels = Simd<u32, LANES>;
 pub type SimdColor = SimdVec4;
 pub type SimdColorGamma = Vec<Simd<u8, LANES>, 4>;
+
+pub type SimdColorRGB = SimdVec3;
+pub type SimdColorSRGB = Vec<Simd<u8, LANES>, 3>;

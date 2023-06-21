@@ -1,0 +1,24 @@
+[[models]]
+path = "../models/half_life/half_life.obj"
+
+[camera]
+kind = "fpv"
+up = "z"
+position = [5.0, 7.0, -4.0]
+rotation = [92.0, 0.0, 80.0]
+fovy = 39.6
+sensitivity = 0.05
+speed = 5.0
+
+[rendering]
+width = 1280
+height = 720
+near = 0.1
+far = 100
+cull-mode = "back-face"
+
+[rasterizer]
+implementation = "bbox-simd"
+
+[config]
+enable-shadows = false

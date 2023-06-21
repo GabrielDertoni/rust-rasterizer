@@ -1,6 +1,6 @@
 use std::{simd::{Simd, SimdFloat, StdFloat, LaneCount, SupportedLaneCount}, ops::Range};
 
-use crate::vec::Vec;
+use crate::{vec::{Vec, Vec3, Vec4}, simd_config::{SimdColorSRGB, SimdColorRGB}};
 
 #[allow(non_upper_case_globals)]
 pub const ZERO_f32x4: Simd<f32, 4> = Simd::from_array([0., 0., 0., 0.]);
@@ -45,4 +45,44 @@ where
 pub fn rgb_hex(c: u32) -> Vec<f32, 3> {
     let [_, r, g, b] = c.to_be_bytes();
     Vec::from([r as f32, g as f32, b as f32]) / 255.
+}
+
+pub fn color_to_u32(c: Vec4) -> u32 {
+    u32::from_be_bytes(c.map(|chan| (chan * 255.) as u8).to_array())
+}
+
+#[inline]
+pub fn simd_srgb_to_rgb(c: SimdColorSRGB) -> SimdColorRGB {
+    c.map(simd_gamma_to_linear)
+}
+
+#[inline]
+pub fn simd_gamma_to_linear<const LANES: usize>(chan: Simd<u8, LANES>) -> Simd<f32, LANES>
+where
+    LaneCount<LANES>: SupportedLaneCount,
+{
+    let chan = chan.cast::<f32>() / Simd::splat(255.);
+    chan * chan
+}
+
+#[inline]
+pub fn simd_rgb_to_srgb(c: SimdColorRGB) -> SimdColorSRGB {
+    c.map(simd_linear_to_gamma)
+}
+
+#[inline]
+pub fn simd_linear_to_gamma<const LANES: usize>(chan: Simd<f32, LANES>) -> Simd<u8, LANES>
+where
+    LaneCount<LANES>: SupportedLaneCount,
+{
+    (chan.sqrt() * Simd::splat(255.)).cast::<u8>()
+}
+
+pub fn srgb_to_linear(c: Vec<u8, 3>) -> Vec3 {
+    c.map(gamma_to_linear)
+}
+
+pub fn gamma_to_linear(chan: u8) -> f32 {
+    let chan = chan as f32 / 255.;
+    chan * chan
 }

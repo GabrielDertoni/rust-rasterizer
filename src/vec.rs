@@ -154,6 +154,10 @@ impl<T: Num, const M: usize, const N: usize> Mat<T, M, N> {
     pub fn element_mul(self, rhs: Self) -> Self {
         self.zip_with(rhs, |lhs, rhs| lhs * rhs)
     }
+
+    pub fn cols(self) -> [[T; M]; N] {
+        self.transpose().rows
+    }
 }
 
 impl<T: Num, const N: usize> Mat<T, N, N> {
@@ -559,6 +563,10 @@ impl<T, const N: usize> Vec<T, N> {
     }
 
     pub fn as_array(&self) -> &[T; N] {
+        unsafe { std::mem::transmute(self) }
+    }
+    
+    pub fn as_mut_array(&mut self) -> &mut [T; N] {
         unsafe { std::mem::transmute(self) }
     }
 

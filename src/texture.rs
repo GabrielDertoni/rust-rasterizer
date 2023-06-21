@@ -240,8 +240,8 @@ where
 
         let [u, v] = uv.to_array();
 
-        let x = u * Simd::splat((self.width() - 1) as f32);
-        let y = (Simd::splat(1.) - v) * Simd::splat((self.height() - 1) as f32);
+        let x = u * Simd::splat((self.width() - 1) as f32) + Simd::splat(0.5);
+        let y = (Simd::splat(1.) - v) * Simd::splat((self.height() - 1) as f32) + Simd::splat(0.5);
 
         let values = unsafe {
             // SAFETY: We either clamp or wrap the value, which already means it can't be `inf` or `-inf`. We also assert that no lanes are

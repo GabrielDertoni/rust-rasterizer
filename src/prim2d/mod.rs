@@ -5,7 +5,7 @@ use crate::{
     pipeline::Metrics,
     texture::BorrowedMutTexture,
     vec::{Vec, Vec2i, Vec4},
-    Attributes, FragmentShader, math::BBox,
+    Attributes, FragmentShader, math::BBox, math_utils::{gamma_to_linear, srgb_to_linear},
 };
 
 pub fn draw_triangles<Attr, S>(
@@ -39,23 +39,10 @@ pub fn draw_triangles<Attr, S>(
             }
         };
 
-        let v0 = attributes[v0];
-        let v1 = attributes[v1];
-        let v2 = attributes[v2];
-
-        let inside_frustum = (-1.0..1.0).contains(&v0.position().z)
-            && (-1.0..1.0).contains(&v1.position().z)
-            && (-1.0..1.0).contains(&v2.position().z);
-
-        if !inside_frustum {
-            metrics.behind_culled += 1;
-            continue;
-        }
-
         draw_triangle(
-            v0,
-            v1,
-            v2,
+            attributes[v0],
+            attributes[v1],
+            attributes[v2],
             frag_shader,
             pixels.borrow_mut(),
             bbox,
@@ -119,6 +106,15 @@ fn draw_triangle<Attr, F>(
 
     let inv_area = 1.0 / tri_area as f32;
 
+    // Compute the offset for correct fill rules (only one triangle should render a pixel shared by adjacent trianges)
+    let bias0 = if is_top_left(p1i, p2i) { 0 } else { -1 };
+    let bias1 = if is_top_left(p2i, p0i) { 0 } else { -1 };
+    let bias2 = if is_top_left(p0i, p1i) { 0 } else { -1 };
+
+    w0_row += bias0;
+    w1_row += bias1;
+    w2_row += bias2;
+
     for y in min.y..=max.y {
         let mut w0 = w0_row;
         let mut w1 = w1_row;
@@ -132,13 +128,11 @@ fn draw_triangle<Attr, F>(
                         #[counter(metrics.performance_counters.fill_pixel)]
 
                         let idx = (x as usize, y as usize);
-                        let w = Vec::from([w0, w1, w2]).to_f32() * inv_area;
+                        let w = Vec::from([w0 - bias0, w1 - bias1, w2 - bias2]).to_f32() * inv_area;
 
                         let interp = Attributes::interpolate(&v0, &v1, &v2, w);
 
-                        let prev_color = Vec::from(pixels[idx]).to_f32() / 255.;
-
-                        let prev_color_linear = prev_color.xyz().map(|chan| chan * chan);
+                        let prev_color_linear = srgb_to_linear(Vec::from(pixels[idx]).xyz());
                         let color_linear = frag_shader.exec(Vec2i::from([x, y]), interp);
                         let alpha = color_linear.w;
                         let blended_linear = prev_color_linear * (1. - alpha) + color_linear.xyz() * alpha;

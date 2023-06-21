@@ -144,3 +144,26 @@ pub fn orient_2d_step(
     let inc = Vec2i::from([-u.y, u.x]);
     (inc, w)
 }
+
+/// Check if a give edge is top or left. Acording to D3D10.
+///
+/// > A top edge, is an edge that is exactly horizontal and is above the other edges.
+/// > A left edge, is an edge that is not exactly horizontal and is on the left side of the triangle.
+///
+/// This allows us to determine if a pixel should be filled when it is on the very edge of a triangle.
+/// 
+/// > Any pixel center which falls inside a triangle is drawn; a pixel is assumed to be inside if it
+/// > passes the top-left rule. The top-left rule is that a pixel center is defined to lie inside of
+/// > a triangle if it lies on the top edge or the left edge of a triangle.
+/// 
+/// ## Sources:
+/// - [Rasterization Rules](https://learn.microsoft.com/en-us/windows/win32/direct3d11/d3d10-graphics-programming-guide-rasterizer-stage-rules?redirectedfrom=MSDN#Triangle)
+/// - [Triangle Rasterization in Practice](https://fgiesen.wordpress.com/2013/02/08/triangle-rasterization-in-practice/)
+///
+pub fn is_top_left(from: Vec2i, to: Vec2i) -> bool {
+    // TODO: Things look reversed... Try to figure out why! (It's the way it looks best)
+    let edge = to - from;
+    let is_top = edge.y == 0 && edge.x > 0;
+    let is_left = edge.y < 0;
+    is_top || is_left
+}
