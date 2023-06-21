@@ -1,5 +1,8 @@
-#![feature(portable_simd, slice_as_chunks)]
+#![feature(portable_simd, slice_as_chunks, vec_into_raw_parts)]
 
+mod shaders;
+
+use image::GenericImageView;
 use notify::{
     event::{Event as NotifyEvent, EventKind as NotifyEventKind},
     Watcher,
@@ -21,26 +24,39 @@ use std::time::{Duration, Instant};
 
 use rasterization::{
     clear_color,
-    config::{Light, RasterizerConfig, RasterizerImplementation, RenderingConfig, Scene},
+    config::{
+        CullingMode, Light, RasterizerConfig, RasterizerImplementation, RenderingConfig, Scene,
+    },
     math::Size,
+    math_utils::color_to_u32,
     obj::{Material, Obj},
     pipeline::PipelineMode,
-    shaders,
     simd_config::LANES,
-    texture::OwnedTexture,
+    texture::{OwnedTexture, TextureWrap},
     texture::{BorrowedMutTexture, BorrowedTexture},
     utils::{FpsCounter, FpvCamera},
-    vec::Vec3,
+    vec::{Mat4x4, Vec3},
     vert_buf::VertBuf,
     FragmentShaderSimd, VertexBuf,
 };
 
 struct Model {
-    position: Vec3,
-    rotation: Vec3,
-    scale: Vec3,
-    textured_subsets: Vec<TexturedSubset>,
-    face_range: Range<usize>,
+    pub name: String,
+    pub position: Vec3,
+    pub rotation: Vec3,
+    pub scale: Vec3,
+    pub textured_subsets: Vec<TexturedSubset>,
+    pub face_range: Range<usize>,
+    pub vertex_range: Range<usize>,
+}
+
+impl Model {
+    pub fn model_matrix(&self) -> Mat4x4 {
+        Mat4x4::identity()
+            .scale(self.scale)
+            .rotate(self.rotation)
+            .translate(self.position)
+    }
 }
 
 struct TexturedSubset {
@@ -48,9 +64,22 @@ struct TexturedSubset {
     range: Range<usize>,
 }
 
-struct LightInfo {
+pub struct LightInfo {
     light: Light,
-    shadow_map: OwnedTexture<f32>,
+    // shadow_map: OwnedTexture<f32>,
+}
+
+impl LightInfo {
+    pub fn model_matrix(&self) -> Mat4x4 {
+        Mat4x4::identity()
+            .translate(self.light.position)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Selected {
+    Model(usize),
+    Light(usize),
 }
 
 pub struct World {
@@ -58,6 +87,8 @@ pub struct World {
     index_buf: Vec<[usize; 3]>,
     materials: Vec<Material>,
     models: Vec<Model>,
+    /// Index into `models`
+    selected: Option<Selected>,
     lights: Vec<LightInfo>,
     depth_buf: Vec<f32>,
     camera: FpvCamera,
@@ -69,7 +100,8 @@ pub struct World {
     rasterizer_cfg: RasterizerConfig,
     // HACK: This option in just there to allow us to `.take()` it
     gui_ctx: Option<raster_egui::Context>,
-    has_focus: bool,
+    in_play_mode: bool,
+    selection_mode: egui_gizmo::GizmoMode,
 }
 
 impl World {
@@ -96,6 +128,7 @@ impl World {
             println!("Model has {} faces", obj.tris.len());
 
             let offset = index_buf.len();
+            let material_idx_offset = materials.len();
             let mut textured_subsets: Vec<TexturedSubset> = obj.use_material.into_iter()
                 .map(|usemtl| {
                     let Some(material_idx) = obj.materials.iter()
@@ -104,7 +137,7 @@ impl World {
                             panic!("could not find material {} in .obj, found {:?}", usemtl.name, names_found);
                         };
                     TexturedSubset {
-                        material_idx,
+                        material_idx: material_idx_offset + material_idx,
                         range: usemtl.range.start + offset .. usemtl.range.end + offset,
                     }
                 })
@@ -112,7 +145,7 @@ impl World {
 
             if textured_subsets.len() == 0 {
                 textured_subsets.push(TexturedSubset {
-                    material_idx: 0,
+                    material_idx: material_idx_offset,
                     range: offset..offset + n_faces,
                 });
             }
@@ -122,11 +155,13 @@ impl World {
             // Need to shift over all indicies to point to where those vertices ended up in the combined vertex buffer.
             index_buf.extend(idx.into_iter().map(|tri| tri.map(|i| i + off)));
             models.push(Model {
+                name: model.name.clone(),
                 position: model.position,
                 rotation: model.rotation,
                 scale: model.scale,
                 textured_subsets,
                 face_range: offset..offset + n_faces,
+                vertex_range: off..off + n_vert,
             });
             materials.extend(obj.materials.into_iter().map(|mut mat| {
                 let (orig_width, orig_height) =
@@ -163,11 +198,11 @@ impl World {
             .lights
             .into_iter()
             .map(|light| {
-                let size = light
-                    .shadow_map_size
-                    .expect("TODO: have default value for shadow map config");
+                // let size = light
+                //     .shadow_map_size
+                //     .expect("TODO: have default value for shadow map config");
                 LightInfo {
-                    shadow_map: OwnedTexture::from_vec(size, size, vec![0.0; size * size]),
+                    // shadow_map: OwnedTexture::from_vec(size, size, vec![0.0; size * size]),
                     light,
                 }
             })
@@ -189,11 +224,18 @@ impl World {
 
         let vert_buf = (0..vert_buf.len()).map(|i| vert_buf.index(i)).collect();
 
+        let egui_ctx = egui::Context::default();
+        egui_ctx.tessellation_options_mut(|options| {
+            // options.feathering = false;
+            options.feathering = true;
+        });
+
         Ok(World {
             vert_buf,
             index_buf,
             materials,
             models,
+            selected: None,
             lights,
             depth_buf: vec![0.0; (width * height) as usize],
             camera: scene.camera.into_fpv(aspect_ratio),
@@ -203,8 +245,9 @@ impl World {
             enable_shadows,
             rendering_cfg: scene.rendering,
             rasterizer_cfg: scene.rasterizer,
-            gui_ctx: Some(raster_egui::Context::new(egui::Context::default(), window)),
-            has_focus: true,
+            gui_ctx: Some(raster_egui::Context::new(egui_ctx, window)),
+            in_play_mode: true,
+            selection_mode: egui_gizmo::GizmoMode::Rotate,
         })
     }
 
@@ -218,20 +261,20 @@ impl World {
 
         self.camera.move_delta(self.axis * dt.as_secs_f32());
 
-        let fog_color = 0x61b7e8ff;
-        clear_color(pixels.borrow_mut(), fog_color);
+        clear_color(
+            pixels.borrow_mut(),
+            color_to_u32(self.rendering_cfg.fog_color),
+        );
 
-        {
-            let start = Instant::now();
-            if self.enable_shadows {
-                todo!();
-                // self.render_with_shadows(pixels);
-            } else {
-                self.render_without_shadows(pixels.borrow_mut());
-            }
-            self.draw_gui(pixels, window);
-            self.fps_counter.record_measurement(start.elapsed());
+        let start = Instant::now();
+        if self.enable_shadows {
+            todo!();
+            // self.render_with_shadows(pixels);
+        } else {
+            self.render_without_shadows(pixels.borrow_mut());
         }
+        self.draw_gui(pixels, window);
+        self.fps_counter.record_measurement(start.elapsed());
 
         if self.enable_logging {
             println!("render time: {:?}", self.fps_counter.mean_time());
@@ -249,11 +292,12 @@ impl World {
 
         depth_buf.as_slice_mut().fill(1.0);
 
-        let camera_transform = self
+        let view_projection = self
             .camera
             .transform_matrix(self.rendering_cfg.near, self.rendering_cfg.far);
 
-        let vert_shader = shaders::textured::TexturedVertexShader::new(camera_transform);
+        let start = std::time::Instant::now();
+
         let mut pipeline = Pipeline::new(
             &self.vert_buf,
             &self.index_buf,
@@ -272,10 +316,12 @@ impl World {
 
         pipeline.set_color_buffer(pixels);
         pipeline.set_depth_buffer(depth_buf);
-        let mut pipeline = pipeline.process_vertices_par(&vert_shader);
 
-        let start = std::time::Instant::now();
         for model in &self.models {
+            let vert_shader = shaders::TexturedVertexShader::new(model.model_matrix(), view_projection);
+            let mut pipeline =
+                pipeline.process_vertices_par(&vert_shader, Some(model.vertex_range.clone()));
+
             for subset in &model.textured_subsets {
                 let texture = &self.materials[subset.material_idx].map_kd;
                 let (texture_pixels, _) = texture.as_chunks::<4>();
@@ -284,7 +330,14 @@ impl World {
                     texture.height() as usize,
                     texture_pixels,
                 );
-                let frag_shader = shaders::textured::TexturedFragmentShader::new(texture);
+                let frag_shader = shaders::TexturedFragmentShader::new(
+                    self.rendering_cfg.near,
+                    self.rendering_cfg.far,
+                    self.rendering_cfg.fog_color,
+                    texture,
+                    self.camera.position,
+                    &self.lights
+                );
 
                 pipeline.draw_par(
                     subset.range.clone(),
@@ -292,8 +345,8 @@ impl World {
                 );
             }
         }
-        println!("time to render models: {:?}", start.elapsed());
         pipeline.finalize();
+        println!("time to render models: {:?}", start.elapsed());
         let metrics = pipeline.get_metrics();
         println!("{metrics}");
     }
@@ -322,7 +375,7 @@ impl World {
             &Event::DeviceEvent {
                 event: DeviceEvent::MouseMotion { delta: (dx, dy) },
                 ..
-            } if self.has_focus() => {
+            } if self.is_in_play_mode() => {
                 self.update_cursor(dx as f32, dy as f32);
                 Response::consumed()
             }
@@ -344,7 +397,14 @@ impl World {
         if !response.consumed {
             let response = self.gui_ctx.as_mut().unwrap().handle_event(event);
             if !response.consumed && is_mouse_click {
-                self.has_focus = true;
+                // self.has_focus = true;
+            }
+            // Suppress the redraw requests comming from the gui
+            if let Some(Cmd::Redraw) = &response.cmd {
+                return Response {
+                    consumed: response.consumed,
+                    cmd: None,
+                };
             }
             response
         } else {
@@ -353,11 +413,14 @@ impl World {
     }
 
     fn handle_key(&mut self, state: ElementState, key: VirtualKeyCode) -> Response {
-        if !self.has_focus {
+        if !self.in_play_mode {
+            if let (ElementState::Pressed, VirtualKeyCode::P) = (state, key) {
+                self.in_play_mode = true;
+            }
             return Response::empty();
         }
         match (state, key) {
-            (ElementState::Pressed, VirtualKeyCode::Escape) => self.has_focus = false,
+            (ElementState::Pressed, VirtualKeyCode::Escape) => self.in_play_mode = false,
             (ElementState::Pressed, VirtualKeyCode::V) => self.axis.z = 1.0,
             (ElementState::Pressed, VirtualKeyCode::C) => self.axis.z = -1.0,
             (ElementState::Released, VirtualKeyCode::V | VirtualKeyCode::C) => self.axis.z = 0.0,
@@ -388,35 +451,143 @@ impl World {
         self.gui_ctx.replace(gui_ctx);
     }
 
-    pub fn has_focus(&self) -> bool {
-        self.has_focus
+    pub fn is_in_play_mode(&self) -> bool {
+        self.in_play_mode
     }
 }
 
 impl raster_egui::App for World {
     fn update(&mut self, ctx: &egui::Context) {
+        if self.is_in_play_mode() {
+            return;
+        }
         egui::Window::new("Info")
             .resizable(true)
             .constrain(false)
+            .frame(
+                egui::Frame::window(&ctx.style())
+                    .shadow(egui::epaint::Shadow::NONE)
+                    .rounding(egui::epaint::Rounding::none()),
+            )
             .drag_bounds(egui::Rect::EVERYTHING)
             .show(ctx, |ui| {
                 ui.style_mut().override_text_style = Some(egui::TextStyle::Monospace);
 
                 ui.label("Camera");
-                ui.label(format!("position {:.1}", self.camera.position));
+                let pos = self.camera.position;
+                ui.label(format!(
+                    "position {{ x: {:.1}, y: {:.1}, z: {:.1} }}",
+                    pos.x, pos.y, pos.z
+                ));
                 ui.label(format!("pitch {:.1}", self.camera.pitch));
                 ui.label(format!("yaw {:.1}", self.camera.yaw));
-                ui.add_space(10.);
+                ui.separator();
 
-                ui.label("Models");
-                ui.label(format!("{:6} vertices", self.vert_buf.len()));
-                ui.label(format!("{:6} faces", self.index_buf.len()));
-                ui.add_space(10.);
-
-                ui.label("Rendering");
+                ui.label("Rendering stats");
                 ui.label(format!("{:6.1} FPS", self.fps_counter.mean_fps()));
                 ui.label(format!("{:6.1?} per frame", self.fps_counter.mean_time()));
+
+                ui.collapsing("Options", |ui| {
+                    egui::Grid::new("rendering options").show(ui, |ui| {
+                        ui.label("Render distance");
+                        ui.add(egui::Slider::new(&mut self.rendering_cfg.far, 1.0..=100.0));
+                        ui.end_row();
+    
+                        ui.label("Fog color");
+                        ui.color_edit_button_rgb(self.rendering_cfg.fog_color.xyz_mut().as_mut_array());
+                        ui.end_row();
+    
+                        ui.label("Culling");
+                        egui::ComboBox::from_id_source("culling")
+                            .selected_text(self.rendering_cfg.culling_mode.to_string())
+                            .show_ui(ui, |ui| {
+                                for mode in CullingMode::enumerate() {
+                                    ui.selectable_value(
+                                        &mut self.rendering_cfg.culling_mode,
+                                        mode,
+                                        mode.to_string(),
+                                    );
+                                }
+                            });
+                        ui.end_row();
+                    });
+                });
+
+                ui.collapsing("Scene", |ui| {
+                    ui.label("Models");
+                    for (i, model) in self.models.iter_mut().enumerate() {
+                        ui.radio_value(&mut self.selected, Some(Selected::Model(i)), &model.name);
+                    }
+
+                    ui.label("Lights");
+                    for (i, light) in self.lights.iter_mut().enumerate() {
+                        ui.horizontal(|ui| {
+                            ui.radio_value(&mut self.selected, Some(Selected::Light(i)), &light.light.name);
+                            ui.collapsing("more", |ui| {
+                                ui.label("Color");
+                                ui.color_edit_button_rgb(&mut light.light.color.as_mut_array());
+                            });
+                        });
+                    }
+                });
+
+                ui.collapsing("Scene statistics", |ui| {
+                    ui.label(format!("{:6} vertices", self.vert_buf.len()));
+                    ui.label(format!("{:6} faces", self.index_buf.len()));
+                });
             });
+
+        if let Some(selected) = self.selected {
+            let model_matrix = match selected {
+                Selected::Model(i) => self.models[i].model_matrix().cols(),
+                Selected::Light(i) => self.lights[i].model_matrix().cols(),
+            };
+            let gizmo = egui_gizmo::Gizmo::new("selection")
+                .view_matrix(self.camera.view_matrix().cols())
+                .projection_matrix(
+                    self.camera
+                        .projection_matrix(self.rendering_cfg.near, self.rendering_cfg.far)
+                        .cols(),
+                )
+                .model_matrix(model_matrix)
+                .mode(self.selection_mode)
+                .visuals(egui_gizmo::GizmoVisuals {
+                    inactive_alpha: 0.8,
+                    highlight_alpha: 1.0,
+                    gizmo_size: 100.0,
+                    ..Default::default()
+                });
+
+            let mut ui = egui::Ui::new(
+                ctx.clone(),
+                egui::LayerId::background(),
+                egui::Id::new("gizmo"),
+                egui::Rect::EVERYTHING,
+                ctx.available_rect(),
+            );
+            if ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::W)) {
+                self.selection_mode = egui_gizmo::GizmoMode::Translate;
+            }
+            if ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::R)) {
+                self.selection_mode = egui_gizmo::GizmoMode::Rotate;
+            }
+            if ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::S)) {
+                self.selection_mode = egui_gizmo::GizmoMode::Scale;
+            }
+            if let Some(response) = gizmo.interact(&mut ui) {
+                let (x, y, z) = response.rotation.to_euler(glam::EulerRot::XYZ);
+                match selected {
+                    Selected::Model(i) => {
+                        self.models[i].rotation = Vec3::from([x, y, z]);
+                        self.models[i].position = Vec3::from(response.translation.to_array());
+                        self.models[i].scale = Vec3::from(response.scale.to_array());
+                    }
+                    Selected::Light(i) => {
+                        self.lights[i].light.position = Vec3::from(response.translation.to_array());
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -474,7 +645,7 @@ fn main() -> anyhow::Result<()> {
             control_flow.set_poll();
         }
 
-        if window.has_focus() && world.has_focus() {
+        if window.has_focus() && world.is_in_play_mode() {
             window
                 .set_cursor_grab(CursorGrabMode::Locked)
                 .or_else(|_| window.set_cursor_grab(CursorGrabMode::Confined))
