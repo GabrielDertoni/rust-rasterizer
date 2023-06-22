@@ -8,7 +8,7 @@ pub use index_layout::*;
 pub use storage::*;
 
 use crate::{
-    math_utils::{simd_clamp01, simd_wrap01},
+    math_utils::{simd_clamp01, simd_wrap01, simd_srgb_to_rgb_f32},
     vec::{Vec, Vec2, Vec2xN, Vec4xN}, math::Size,
 };
 
@@ -263,12 +263,13 @@ where
         };
 
         let ff_mask = Simd::splat(0xff);
-        Vec::from([
+        let color = Vec::from([
             (values & ff_mask).cast(),
             ((values >> Simd::splat(8)) & ff_mask).cast(),
             ((values >> Simd::splat(16)) & ff_mask).cast(),
             ((values >> Simd::splat(24)) & ff_mask).cast(),
-        ]) / Simd::splat(255.)
+        ]) / Simd::splat(255.);
+        Vec::from((simd_srgb_to_rgb_f32(color.xyz()), color.w))
     }
 }
 

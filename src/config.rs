@@ -14,6 +14,8 @@ pub struct Scene {
     pub rasterizer: RasterizerConfig,
     #[serde(default)]
     pub lights: Vec<Light>,
+    #[serde(default = "Scene::default_ambient_light", deserialize_with = "detail::deser_vec3")]
+    pub ambient_light: Vec3,
     #[serde(default)]
     pub config: toml::Table,
 }
@@ -25,6 +27,10 @@ impl Scene {
             .with_context(|| format!("failed to read file {path:?}"))?;
         let scene = toml::from_str(&contents)?;
         Ok(scene)
+    }
+
+    fn default_ambient_light() -> Vec3 {
+        Vec3::repeat(0.15)
     }
 }
 

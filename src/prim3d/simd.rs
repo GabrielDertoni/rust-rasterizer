@@ -1,14 +1,18 @@
-use std::{simd::{Simd, SimdPartialOrd}, ops::Range};
+use std::{
+    ops::Range,
+    simd::{Simd, SimdPartialOrd},
+};
 
 use crate::{
     common::*,
     config::CullingMode,
-    math_utils::simd_clamp01,
+    math::BBox,
+    math_utils::{simd_clamp01, simd_rgb_to_srgb, simd_srgb_to_rgb},
     pipeline::Metrics,
     simd_config::*,
     texture::BorrowedMutTexture,
     vec::{Vec, Vec2i, Vec3},
-    Attributes, AttributesSimd, FragmentShaderSimd, IntoSimd, ScreenPos, math::BBox,
+    Attributes, AttributesSimd, FragmentShaderSimd, IntoSimd, ScreenPos,
 };
 
 pub fn draw_triangles<Attr, S>(
@@ -137,6 +141,15 @@ fn draw_triangle<VertOut, S>(
 
     let mut row_start = (min.y - bbox.y) as usize * stride + (min.x - bbox.x) as usize;
 
+    // Compute the offset for correct fill rules (only one triangle should render a pixel shared by adjacent trianges)
+    let bias0 = Simd::splat(if is_top_left(p1i, p2i) { 0 } else { -1 });
+    let bias1 = Simd::splat(if is_top_left(p2i, p0i) { 0 } else { -1 });
+    let bias2 = Simd::splat(if is_top_left(p0i, p1i) { 0 } else { -1 });
+
+    w0_row += bias0;
+    w1_row += bias1;
+    w2_row += bias2;
+
     count_cycles! {
         #[counter(metrics.performance_counters.process_pixel, increment = ((max.x - min.x + 1) * (max.y - min.y + 1)) as u64)]
 
@@ -151,7 +164,7 @@ fn draw_triangle<VertOut, S>(
                 let mask = (w0 | w1 | w2).simd_ge(Simd::splat(0));
 
                 if mask.any() {
-                    let w = Vec::from([w0, w1, w2]).to_f32() * inv_area;
+                    let w = Vec::from([w0 - bias0, w1 - bias1, w2 - bias2]).to_f32() * inv_area;
 
                     let mut w_persp = w.element_mul(Vec3::from([p0_ndc.w, p1_ndc.w, p2_ndc.w]).splat());
                     w_persp /= w_persp.x + w_persp.y + w_persp.z;
@@ -210,9 +223,9 @@ fn blend_pixels(
     alpha_clip: Option<SimdF32>,
 ) {
     let alpha = frag_output.w;
-    let prev_color = pixels.map(|chan| chan.cast::<f32>() / Simd::splat(255.));
-    let blended = frag_output * alpha + prev_color * (Simd::splat(1.) - alpha);
-    let blended_srgb = blended.map(|chan| (simd_clamp01(chan) * Simd::splat(255.)).cast::<u8>());
+    let prev_color_linear = simd_srgb_to_rgb(pixels.xyz());
+    let blended_linear = frag_output.xyz() * alpha + prev_color_linear * (Simd::splat(1.) - alpha);
+    let blended_srgb = SimdColorGamma::from((simd_rgb_to_srgb(blended_linear.map(simd_clamp01)), Simd::splat(255)));
 
     if let Some(alpha_clip) = alpha_clip {
         *mask = *mask & alpha.simd_gt(alpha_clip);

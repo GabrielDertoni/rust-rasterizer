@@ -14,12 +14,6 @@ use crate::{
     VertexShader,
 };
 
-macro_rules! static_assert_eq {
-    ($lhs:expr, $rhs:expr) => {{
-        const _ASSERTION: [(); ($lhs == $rhs) as usize] = [()];
-    }};
-}
-
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub enum PipelineMode {
     #[default]

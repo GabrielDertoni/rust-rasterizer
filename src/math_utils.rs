@@ -57,11 +57,27 @@ pub fn simd_srgb_to_rgb(c: SimdColorSRGB) -> SimdColorRGB {
 }
 
 #[inline]
+pub fn simd_srgb_to_rgb_f32<const LANES: usize>(c: Vec<Simd<f32, LANES>, 3>) -> Vec<Simd<f32, LANES>, 3>
+where
+    LaneCount<LANES>: SupportedLaneCount,
+{
+    c.map(simd_gamma_to_linear_f32)
+}
+
+#[inline]
 pub fn simd_gamma_to_linear<const LANES: usize>(chan: Simd<u8, LANES>) -> Simd<f32, LANES>
 where
     LaneCount<LANES>: SupportedLaneCount,
 {
     let chan = chan.cast::<f32>() / Simd::splat(255.);
+    chan * chan
+}
+
+#[inline]
+pub fn simd_gamma_to_linear_f32<const LANES: usize>(chan: Simd<f32, LANES>) -> Simd<f32, LANES>
+where
+    LaneCount<LANES>: SupportedLaneCount,
+{
     chan * chan
 }
 
@@ -82,7 +98,15 @@ pub fn srgb_to_linear(c: Vec<u8, 3>) -> Vec3 {
     c.map(gamma_to_linear)
 }
 
+pub fn srgb_to_linear_f32(c: Vec<f32, 3>) -> Vec3 {
+    c.map(gamma_to_linear_f32)
+}
+
 pub fn gamma_to_linear(chan: u8) -> f32 {
     let chan = chan as f32 / 255.;
+    chan * chan
+}
+
+pub fn gamma_to_linear_f32(chan: f32) -> f32 {
     chan * chan
 }

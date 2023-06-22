@@ -1,7 +1,7 @@
 use rasterization::{
-    math_utils::{rgb_hex, simd_mix, simd_remap},
-    texture::{BorrowedTextureRGBA, RowMajorPowerOf2, TextureWrap},
-    vec::{Mat4x4, Vec, Vec2, Vec3, Vec3xN, Vec4, Vec4xN},
+    math_utils::{simd_mix, simd_remap},
+    texture::{BorrowedTextureRGBA, TextureWrap, RowMajor},
+    vec::{Mat4x4, Vec, Vec2, Vec3, Vec4, Vec4xN},
     Attributes, AttributesSimd, FragmentShaderSimd, IntoSimd, StructureOfArray, Vertex,
     VertexShader,
 };
@@ -50,19 +50,21 @@ impl VertexShader<Vertex> for TexturedVertexShader {
 pub struct TexturedFragmentShader<'a> {
     near: f32,
     far: f32,
-    fog_color: Vec4,
+    fog_color: Vec3,
     light_infos: &'a [LightInfo],
+    ambient_light: Vec3,
     camera_pos: Vec3,
-    texture: BorrowedTextureRGBA<'a, RowMajorPowerOf2>,
+    texture: BorrowedTextureRGBA<'a, RowMajor>,
 }
 
 impl<'a> TexturedFragmentShader<'a> {
     pub fn new(
         near: f32,
         far: f32,
-        fog_color: Vec4,
-        texture: BorrowedTextureRGBA<'a, RowMajorPowerOf2>,
+        fog_color: Vec3,
+        texture: BorrowedTextureRGBA<'a, RowMajor>,
         camera_pos: Vec3,
+        ambient_light: Vec3,
         light_infos: &'a [LightInfo],
     ) -> Self {
         TexturedFragmentShader {
@@ -71,6 +73,7 @@ impl<'a> TexturedFragmentShader<'a> {
             fog_color,
             texture,
             light_infos,
+            ambient_light,
             camera_pos,
         }
     }
@@ -88,8 +91,8 @@ where
         _pixel_coords: Vec<Simd<i32, LANES>, 2>,
         attrs: TexturedAttributesSimd<LANES>,
     ) -> Vec4xN<LANES> {
-        let mut intensity = Vec3xN::<LANES>::zero();
-        let ambient = Vec3xN::repeat(Simd::splat(0.15));
+        let ambient = self.ambient_light.splat();
+        let mut intensity = ambient;
         for light_info in self.light_infos {
             let light_dir =
                 (light_info.light.position.splat() - attrs.frag_position.xyz()).normalized();
@@ -118,7 +121,7 @@ where
             .simd_index_uv(attrs.uv, mask, TextureWrap::Repeat);
         let alpha = texture_color.w;
 
-        let lit_color = (ambient + intensity).element_mul(texture_color.xyz());
+        let lit_color = intensity.element_mul(texture_color.xyz());
 
         let depth = simd_remap(
             Simd::splat(1.) / attrs.position_ndc.w,
@@ -127,7 +130,7 @@ where
         );
         let fog_color = self.fog_color.splat();
         (
-            simd_mix(fog_color.xyz(), lit_color.xyz(), depth * depth * depth),
+            simd_mix(fog_color, lit_color.xyz(), depth * depth * depth),
             alpha,
         )
             .into()

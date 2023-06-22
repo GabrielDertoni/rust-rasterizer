@@ -1,8 +1,9 @@
 use crate::{
-    VertexShader, Attributes,
-    vec::{Vec, Vec2i, Vec2, Vec3, Vec4, Num}, pipeline::Metrics, math::Size,
+    math::Size,
+    pipeline::Metrics,
+    vec::{Vec, Vec2, Vec2i, Vec3, Vec4},
+    Attributes, VertexShader,
 };
-
 
 macro_rules! count_cycles {
     (
@@ -115,7 +116,12 @@ pub fn is_inside_frustum(p0_ndc: Vec3, p1_ndc: Vec3, p2_ndc: Vec3) -> bool {
             && (-1.0..1.0).contains(&p2_ndc.z))
 }
 
-pub fn process_vertex<Vert, V>(v: Vert, vert_shader: &V, viewport: Size<f32>, metrics: &mut Metrics) -> V::Output
+pub fn process_vertex<Vert, V>(
+    v: Vert,
+    vert_shader: &V,
+    viewport: Size<f32>,
+    #[allow(unused_variables)] metrics: &mut Metrics,
+) -> V::Output
 where
     V: VertexShader<Vert>,
 {
@@ -133,11 +139,7 @@ where
 }
 
 #[inline(always)]
-pub fn orient_2d_step(
-    from: Vec2i,
-    to: Vec2i,
-    p: Vec2i,
-) -> (Vec2i, i32) {
+pub fn orient_2d_step(from: Vec2i, to: Vec2i, p: Vec2i) -> (Vec2i, i32) {
     let u = to - from;
     let c = u.y * from.x - u.x * from.y;
     let w = u.x * p.y - u.y * p.x + c;
@@ -151,11 +153,11 @@ pub fn orient_2d_step(
 /// > A left edge, is an edge that is not exactly horizontal and is on the left side of the triangle.
 ///
 /// This allows us to determine if a pixel should be filled when it is on the very edge of a triangle.
-/// 
+///
 /// > Any pixel center which falls inside a triangle is drawn; a pixel is assumed to be inside if it
 /// > passes the top-left rule. The top-left rule is that a pixel center is defined to lie inside of
 /// > a triangle if it lies on the top edge or the left edge of a triangle.
-/// 
+///
 /// ## Sources:
 /// - [Rasterization Rules](https://learn.microsoft.com/en-us/windows/win32/direct3d11/d3d10-graphics-programming-guide-rasterizer-stage-rules?redirectedfrom=MSDN#Triangle)
 /// - [Triangle Rasterization in Practice](https://fgiesen.wordpress.com/2013/02/08/triangle-rasterization-in-practice/)

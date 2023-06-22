@@ -1,8 +1,8 @@
 #![feature(portable_simd, slice_as_chunks, vec_into_raw_parts)]
+#![windows_subsystem = "windows"]
 
 mod shaders;
 
-use image::GenericImageView;
 use notify::{
     event::{Event as NotifyEvent, EventKind as NotifyEventKind},
     Watcher,
@@ -28,11 +28,10 @@ use rasterization::{
         CullingMode, Light, RasterizerConfig, RasterizerImplementation, RenderingConfig, Scene,
     },
     math::Size,
-    math_utils::color_to_u32,
+    math_utils::{color_to_u32, remap, srgb_to_linear_f32},
     obj::{Material, Obj},
     pipeline::PipelineMode,
     simd_config::LANES,
-    texture::{OwnedTexture, TextureWrap},
     texture::{BorrowedMutTexture, BorrowedTexture},
     utils::{FpsCounter, FpvCamera},
     vec::{Mat4x4, Vec3},
@@ -46,7 +45,6 @@ struct Model {
     pub rotation: Vec3,
     pub scale: Vec3,
     pub textured_subsets: Vec<TexturedSubset>,
-    pub face_range: Range<usize>,
     pub vertex_range: Range<usize>,
 }
 
@@ -54,7 +52,7 @@ impl Model {
     pub fn model_matrix(&self) -> Mat4x4 {
         Mat4x4::identity()
             .scale(self.scale)
-            .rotate(self.rotation)
+            .rotate(self.rotation.map(|el| el.to_radians()))
             .translate(self.position)
     }
 }
@@ -71,8 +69,7 @@ pub struct LightInfo {
 
 impl LightInfo {
     pub fn model_matrix(&self) -> Mat4x4 {
-        Mat4x4::identity()
-            .translate(self.light.position)
+        Mat4x4::identity().translate(self.light.position)
     }
 }
 
@@ -90,6 +87,7 @@ pub struct World {
     /// Index into `models`
     selected: Option<Selected>,
     lights: Vec<LightInfo>,
+    ambient_light: Vec3,
     depth_buf: Vec<f32>,
     camera: FpvCamera,
     fps_counter: FpsCounter,
@@ -102,6 +100,7 @@ pub struct World {
     gui_ctx: Option<raster_egui::Context>,
     in_play_mode: bool,
     selection_mode: egui_gizmo::GizmoMode,
+    t: f32,
 }
 
 impl World {
@@ -160,49 +159,16 @@ impl World {
                 rotation: model.rotation,
                 scale: model.scale,
                 textured_subsets,
-                face_range: offset..offset + n_faces,
                 vertex_range: off..off + n_vert,
             });
-            materials.extend(obj.materials.into_iter().map(|mut mat| {
-                let (orig_width, orig_height) =
-                    (mat.map_kd.width() as usize, mat.map_kd.height() as usize);
-                let (mut width, mut height) = (orig_width as usize, orig_height as usize);
-                if !width.is_power_of_two() {
-                    width = width.next_power_of_two();
-                }
-                if !height.is_power_of_two() {
-                    height = height.next_power_of_two();
-                }
-                if width != orig_width || height != orig_height {
-                    let mut buf = vec![0u8; width * height * 4];
-                    let slice = &mat.map_kd as &[u8];
-                    for row in 0..orig_height {
-                        let start_row = row * width * 4;
-                        let start_row_orig = row * orig_width * 4;
-                        buf[start_row..start_row + orig_width * 4].copy_from_slice(
-                            &slice[start_row_orig..start_row_orig + orig_width * 4],
-                        );
-                    }
-                    mat.map_kd = image::ImageBuffer::<image::Rgba<u8>, _>::from_vec(
-                        width as u32,
-                        height as u32,
-                        buf,
-                    )
-                    .unwrap();
-                }
-                mat
-            }));
+            materials.extend(obj.materials);
         }
 
         let lights = scene
             .lights
             .into_iter()
             .map(|light| {
-                // let size = light
-                //     .shadow_map_size
-                //     .expect("TODO: have default value for shadow map config");
                 LightInfo {
-                    // shadow_map: OwnedTexture::from_vec(size, size, vec![0.0; size * size]),
                     light,
                 }
             })
@@ -237,6 +203,7 @@ impl World {
             models,
             selected: None,
             lights,
+            ambient_light: scene.ambient_light,
             depth_buf: vec![0.0; (width * height) as usize],
             camera: scene.camera.into_fpv(aspect_ratio),
             fps_counter: FpsCounter::new(),
@@ -248,18 +215,88 @@ impl World {
             gui_ctx: Some(raster_egui::Context::new(egui_ctx, window)),
             in_play_mode: true,
             selection_mode: egui_gizmo::GizmoMode::Rotate,
+            t: 0.0,
         })
     }
 
-    pub fn render(&mut self, buf: &mut [u8], dt: Duration, window: &Window) {
+    pub fn update(&mut self, dt: Duration) {
+        use std::f32::consts::PI;
+
+        self.t += dt.as_secs_f32();
+        let x_pos = remap((self.t * PI / 5.0).cos(), 1.0..-1.0, -33.0..28.0);
+        for model in self.models.iter_mut() {
+            match model.name.as_str() {
+                "steve" => {
+                    model.position.x = x_pos;
+                }
+                "minecart" => {
+                    model.position.x = x_pos;
+                }
+                "bee" => {
+                    let center = Vec3::from([-21.0, 30.0, 36.0]);
+                    let radius = 5.0;
+                    model.position.x =
+                        remap((self.t * PI / 5.0).cos(), -1.0..1.0, -radius..radius) + center.x;
+                    model.position.y =
+                        remap((self.t * PI / 5.0).sin(), -1.0..1.0, -radius..radius) + center.y;
+                    let x_dir = remap(
+                        (self.t * PI / 5.0).sin() * PI / 5.0,
+                        -1.0..1.0,
+                        -radius..radius,
+                    );
+                    let y_dir = remap(
+                        -(self.t * PI / 5.0).cos() * PI / 5.0,
+                        -1.0..1.0,
+                        -radius..radius,
+                    );
+                    let z_ang = y_dir.atan2(x_dir);
+                    model.rotation.z = z_ang.to_degrees() - 180.0;
+                }
+                "heart" => {
+                    let z_pos = 12.5;
+                    model.position.z = z_pos + 0.5 * (self.t * PI * 0.5).cos();
+                    model.rotation.z = (self.t * 0.5).to_degrees();
+                }
+                _ => (),
+            }
+        }
+
+        let colors = [
+            (Vec3::from([196., 235., 255.]) / 255., Vec3::from([254., 190., 75.]) / 255.),
+            (Vec3::from([228., 198., 159.]) / 255., Vec3::from([228., 198., 159.]) / 255.),
+            (Vec3::from([41., 45., 84.]) / 255., Vec3::from([41., 45., 84.]) / 255.),
+        ];
+
+        if let Some(light) = self
+            .lights
+            .iter_mut()
+            .find(|light| light.light.name == "sun")
+        {
+            let time_of_day = self.t / 15.0;
+            let curr = (time_of_day as usize) % colors.len();
+            let next = (curr + 1) % colors.len();
+            let blending_factor = (self.t / 15.0).fract();
+            let fog_color =
+                colors[curr].0 * (1.0 - blending_factor) + colors[next].0 * blending_factor;
+            let light_color =
+                colors[curr].1 * (1.0 - blending_factor) + colors[next].1 * blending_factor;
+            light.light.color = light_color;
+            self.rendering_cfg.fog_color = (fog_color, 1.0).into();
+        }
+
+        self.camera.move_delta(self.axis * dt.as_secs_f32());
+        self.camera.position.x = self.camera.position.x.clamp(-37.0, 38.0);
+        self.camera.position.y = self.camera.position.y.clamp(-83.0, 82.0);
+        self.camera.position.z = self.camera.position.z.clamp(1.0, 60.0);
+    }
+
+    pub fn render(&mut self, buf: &mut [u8], window: &Window) {
         let (pixels, _) = buf.as_chunks_mut::<4>();
         let mut pixels = BorrowedMutTexture::from_mut_slice(
             self.rendering_cfg.width as usize,
             self.rendering_cfg.height as usize,
             pixels,
         );
-
-        self.camera.move_delta(self.axis * dt.as_secs_f32());
 
         clear_color(
             pixels.borrow_mut(),
@@ -318,7 +355,8 @@ impl World {
         pipeline.set_depth_buffer(depth_buf);
 
         for model in &self.models {
-            let vert_shader = shaders::TexturedVertexShader::new(model.model_matrix(), view_projection);
+            let vert_shader =
+                shaders::TexturedVertexShader::new(model.model_matrix(), view_projection);
             let mut pipeline =
                 pipeline.process_vertices_par(&vert_shader, Some(model.vertex_range.clone()));
 
@@ -333,10 +371,11 @@ impl World {
                 let frag_shader = shaders::TexturedFragmentShader::new(
                     self.rendering_cfg.near,
                     self.rendering_cfg.far,
-                    self.rendering_cfg.fog_color,
+                    srgb_to_linear_f32(self.rendering_cfg.fog_color.xyz()),
                     texture,
                     self.camera.position,
-                    &self.lights
+                    self.ambient_light,
+                    &self.lights,
                 );
 
                 pipeline.draw_par(
@@ -458,6 +497,59 @@ impl World {
 
 impl raster_egui::App for World {
     fn update(&mut self, ctx: &egui::Context) {
+        if let Some(selected) = self.selected {
+            let model_matrix = match selected {
+                Selected::Model(i) => self.models[i].model_matrix().cols(),
+                Selected::Light(i) => self.lights[i].model_matrix().cols(),
+            };
+            let gizmo = egui_gizmo::Gizmo::new("selection")
+                .view_matrix(self.camera.view_matrix().cols())
+                .projection_matrix(
+                    self.camera
+                        .projection_matrix(self.rendering_cfg.near, self.rendering_cfg.far)
+                        .cols(),
+                )
+                .model_matrix(model_matrix)
+                .mode(self.selection_mode)
+                .visuals(egui_gizmo::GizmoVisuals {
+                    inactive_alpha: 0.8,
+                    highlight_alpha: 1.0,
+                    gizmo_size: 100.0,
+                    ..Default::default()
+                });
+
+            let mut ui = egui::Ui::new(
+                ctx.clone(),
+                egui::LayerId::background(),
+                egui::Id::new("gizmo"),
+                egui::Rect::EVERYTHING,
+                ctx.available_rect(),
+            );
+            if !self.is_in_play_mode() {
+                if ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::W)) {
+                    self.selection_mode = egui_gizmo::GizmoMode::Translate;
+                }
+                if ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::R)) {
+                    self.selection_mode = egui_gizmo::GizmoMode::Rotate;
+                }
+                if ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::S)) {
+                    self.selection_mode = egui_gizmo::GizmoMode::Scale;
+                }
+            }
+            if let Some(response) = gizmo.interact(&mut ui) {
+                let (x, y, z) = response.rotation.to_euler(glam::EulerRot::XYZ);
+                match selected {
+                    Selected::Model(i) => {
+                        self.models[i].rotation = Vec3::from([x, y, z]);
+                        self.models[i].position = Vec3::from(response.translation.to_array());
+                        self.models[i].scale = Vec3::from(response.scale.to_array());
+                    }
+                    Selected::Light(i) => {
+                        self.lights[i].light.position = Vec3::from(response.translation.to_array());
+                    }
+                }
+            }
+        }
         if self.is_in_play_mode() {
             return;
         }
@@ -492,11 +584,13 @@ impl raster_egui::App for World {
                         ui.label("Render distance");
                         ui.add(egui::Slider::new(&mut self.rendering_cfg.far, 1.0..=100.0));
                         ui.end_row();
-    
+
                         ui.label("Fog color");
-                        ui.color_edit_button_rgb(self.rendering_cfg.fog_color.xyz_mut().as_mut_array());
+                        ui.color_edit_button_rgb(
+                            self.rendering_cfg.fog_color.xyz_mut().as_mut_array(),
+                        );
                         ui.end_row();
-    
+
                         ui.label("Culling");
                         egui::ComboBox::from_id_source("culling")
                             .selected_text(self.rendering_cfg.culling_mode.to_string())
@@ -510,6 +604,21 @@ impl raster_egui::App for World {
                                 }
                             });
                         ui.end_row();
+
+                        ui.label("Alpha clip");
+                        let mut checked = self.rendering_cfg.alpha_clip.is_some();
+                        ui.checkbox(&mut checked, "enable");
+                        if checked {
+                            if self.rendering_cfg.alpha_clip.is_none() {
+                                self.rendering_cfg.alpha_clip.replace(0.0);
+                            }
+                            let alpha_clip = self.rendering_cfg.alpha_clip.as_mut().unwrap();
+                            ui.add(egui::Slider::new(alpha_clip, 0.0..=1.0));
+                        } else {
+                            if self.rendering_cfg.alpha_clip.is_some() {
+                                self.rendering_cfg.alpha_clip = None;
+                            }
+                        }
                     });
                 });
 
@@ -522,13 +631,26 @@ impl raster_egui::App for World {
                     ui.label("Lights");
                     for (i, light) in self.lights.iter_mut().enumerate() {
                         ui.horizontal(|ui| {
-                            ui.radio_value(&mut self.selected, Some(Selected::Light(i)), &light.light.name);
+                            ui.radio_value(
+                                &mut self.selected,
+                                Some(Selected::Light(i)),
+                                &light.light.name,
+                            );
                             ui.collapsing("more", |ui| {
                                 ui.label("Color");
                                 ui.color_edit_button_rgb(&mut light.light.color.as_mut_array());
                             });
                         });
                     }
+                    if ui.button("Deselect").clicked() {
+                        self.selected = None;
+                    }
+                    ui.separator();
+
+                    ui.horizontal(|ui| {
+                        ui.label("Ambient light");
+                        ui.color_edit_button_rgb(&mut self.ambient_light.as_mut_array());
+                    });
                 });
 
                 ui.collapsing("Scene statistics", |ui| {
@@ -536,58 +658,6 @@ impl raster_egui::App for World {
                     ui.label(format!("{:6} faces", self.index_buf.len()));
                 });
             });
-
-        if let Some(selected) = self.selected {
-            let model_matrix = match selected {
-                Selected::Model(i) => self.models[i].model_matrix().cols(),
-                Selected::Light(i) => self.lights[i].model_matrix().cols(),
-            };
-            let gizmo = egui_gizmo::Gizmo::new("selection")
-                .view_matrix(self.camera.view_matrix().cols())
-                .projection_matrix(
-                    self.camera
-                        .projection_matrix(self.rendering_cfg.near, self.rendering_cfg.far)
-                        .cols(),
-                )
-                .model_matrix(model_matrix)
-                .mode(self.selection_mode)
-                .visuals(egui_gizmo::GizmoVisuals {
-                    inactive_alpha: 0.8,
-                    highlight_alpha: 1.0,
-                    gizmo_size: 100.0,
-                    ..Default::default()
-                });
-
-            let mut ui = egui::Ui::new(
-                ctx.clone(),
-                egui::LayerId::background(),
-                egui::Id::new("gizmo"),
-                egui::Rect::EVERYTHING,
-                ctx.available_rect(),
-            );
-            if ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::W)) {
-                self.selection_mode = egui_gizmo::GizmoMode::Translate;
-            }
-            if ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::R)) {
-                self.selection_mode = egui_gizmo::GizmoMode::Rotate;
-            }
-            if ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::S)) {
-                self.selection_mode = egui_gizmo::GizmoMode::Scale;
-            }
-            if let Some(response) = gizmo.interact(&mut ui) {
-                let (x, y, z) = response.rotation.to_euler(glam::EulerRot::XYZ);
-                match selected {
-                    Selected::Model(i) => {
-                        self.models[i].rotation = Vec3::from([x, y, z]);
-                        self.models[i].position = Vec3::from(response.translation.to_array());
-                        self.models[i].scale = Vec3::from(response.scale.to_array());
-                    }
-                    Selected::Light(i) => {
-                        self.lights[i].light.position = Vec3::from(response.translation.to_array());
-                    }
-                }
-            }
-        }
     }
 }
 
@@ -628,6 +698,8 @@ fn main() -> anyhow::Result<()> {
         Err(e) => eprintln!("watch error: {e}"),
     })?;
     watcher.watch(scene_path.as_ref(), notify::RecursiveMode::NonRecursive)?;
+
+    let _guard = play_sound();
 
     let target_render_time = fps.map(|fps| Duration::from_secs_f32(1. / fps));
 
@@ -673,7 +745,8 @@ fn main() -> anyhow::Result<()> {
                 let dt = start.elapsed();
                 start = Instant::now();
 
-                world.render(pixels.frame_mut(), dt, &window);
+                world.update(dt);
+                world.render(pixels.frame_mut(), &window);
                 pixels.render().unwrap();
 
                 println!("FPS: {:.1}", 1. / dt.as_secs_f32());
@@ -716,5 +789,21 @@ fn main() -> anyhow::Result<()> {
                 }
             }
         }
-    })
+    });
+}
+
+use rodio::{Decoder, OutputStream, source::Source};
+
+fn play_sound() -> OutputStream {
+    use std::io::Cursor;
+
+    let (stream, stream_handle) = OutputStream::try_default().unwrap();
+
+    let bytes = include_bytes!("..\\assets\\C418_Minecraft_Sweden_1.mp3");
+    // Decode that sound file into a source
+    let source = Decoder::new(Cursor::new(bytes)).unwrap();
+    // Play the sound directly on the device
+    stream_handle.play_raw(source.convert_samples()).unwrap();
+
+    stream
 }
