@@ -1,7 +1,6 @@
 use crate::{
-    math::Size,
     pipeline::Metrics,
-    vec::{Vec, Vec2, Vec2i, Vec3, Vec4},
+    math::{Size, Vec, Vec2, Vec2i, Vec3, Num},
     Attributes, VertexShader,
 };
 
@@ -35,6 +34,7 @@ macro_rules! count_cycles {
 
 pub(crate) use count_cycles;
 
+#[allow(dead_code)]
 pub fn ndc_to_screen(ndc: Vec2, width: f32, height: f32) -> Vec2 {
     Vec2::from([
         ndc.x * width / 2. + width / 2.,
@@ -64,44 +64,10 @@ pub fn ndc_to_viewport(ndc: Vec2, viewport: Size<f32>) -> Vec2 {
 /// - `W.z = orient_2d(C, A, P) / orient_2d(A, B, C)`
 ///
 /// It's also worth noting that `orient_2d(A, B, C)` is twice the area of the triangle ABC.
-pub fn orient_2d<T: crate::vec::Num>(from: Vec<T, 2>, to: Vec<T, 2>, p: Vec<T, 2>) -> T {
+pub fn orient_2d<T: Num>(from: Vec<T, 2>, to: Vec<T, 2>, p: Vec<T, 2>) -> T {
     let u = to - from;
     let v = p - from;
     u.x * v.y - u.y * v.x
-}
-
-// source: https://www.cs.utexas.edu/~fussell/courses/cs354-fall2015/lectures/lecture9.pdf
-// This assumes that if all points are outside the frustum, than so is the triangle
-pub fn is_inside_frustum_clip(p0_clip: Vec4, p1_clip: Vec4, p2_clip: Vec4) -> bool {
-    let range0 = -p0_clip.w..p0_clip.w;
-    let range1 = -p1_clip.w..p1_clip.w;
-    let range2 = -p2_clip.w..p2_clip.w;
-
-    (range0.contains(&p0_clip.x) && range0.contains(&p0_clip.y) && range0.contains(&p0_clip.z))
-        || (range1.contains(&p1_clip.x)
-            && range1.contains(&p1_clip.y)
-            && range1.contains(&p1_clip.z))
-        || (range2.contains(&p2_clip.x)
-            && range2.contains(&p2_clip.y)
-            && range2.contains(&p2_clip.z))
-}
-
-pub fn is_inside_frustum_screen(
-    p0_screen: Vec3,
-    p1_screen: Vec3,
-    p2_screen: Vec3,
-    width: f32,
-    height: f32,
-) -> bool {
-    ((0.0..width).contains(&p0_screen.x)
-        && (0.0..height).contains(&p0_screen.y)
-        && (-1.0..1.0).contains(&p0_screen.z))
-        || ((0.0..width).contains(&p1_screen.x)
-            && (0.0..height).contains(&p1_screen.y)
-            && (-1.0..1.0).contains(&p1_screen.z))
-        || ((0.0..width).contains(&p2_screen.x)
-            && (0.0..height).contains(&p2_screen.y)
-            && (-1.0..1.0).contains(&p2_screen.z))
 }
 
 pub fn is_inside_frustum(p0_ndc: Vec3, p1_ndc: Vec3, p2_ndc: Vec3) -> bool {

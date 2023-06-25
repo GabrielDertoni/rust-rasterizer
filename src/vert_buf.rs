@@ -1,6 +1,6 @@
 use std::{vec::Vec as AllocVec, iter::IntoIterator};
 
-use crate::{vec::{Vec4, Vec3, Vec2}, Vertex, obj, VertexBuf};
+use crate::{math::{Vec4, Vec3, Vec2}, Vertex, obj, VertexBuf};
 
 /// INVARIANT: The length of all fields is the same
 #[derive(Clone, Default)]

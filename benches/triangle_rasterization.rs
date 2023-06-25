@@ -8,7 +8,7 @@ use rasterization::{
     prim3d::{self, CullBackFaces},
     shaders,
     utils::{Camera, FpvCamera},
-    vec::{Mat4x4, Vec2, Vec3, Vec4},
+    math::{Mat4x4, Vec2, Vec3, Vec4},
     vertex_shader_simd, IntoSimd, VertBuf, Vertex, VertexBuf,
 };
 

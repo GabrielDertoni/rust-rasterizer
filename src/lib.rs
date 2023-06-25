@@ -11,7 +11,6 @@
 
 pub(crate) mod common;
 
-pub mod buf;
 pub mod vert_buf;
 pub mod obj;
 pub mod pipeline;
@@ -21,13 +20,7 @@ pub mod config;
 pub mod simd_config;
 pub mod texture;
 pub mod utils;
-pub mod vec;
-pub mod math_utils;
 pub mod math;
-
-// TODO: Move to separate crate
-// pub mod frag_shaders;
-pub mod shaders;
 
 pub type ScreenPos = (i32, i32, f32);
 pub type Pixel = [u8; 4];
@@ -36,8 +29,7 @@ use core::panic;
 use std::simd::{LaneCount, Mask, Simd, SimdElement, SupportedLaneCount};
 
 use texture::BorrowedMutTexture;
-use vec::{Vec, Vec2, Vec3, Vec4, Vec4xN};
-use vec::{Vec2i, Vec3xN};
+use math::{Vec2i, Vec3xN, Vec, Vec2, Vec3, Vec4, Vec4xN};
 
 pub fn triangles_iter<'a, V>(
     vert: &'a [V],

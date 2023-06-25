@@ -6,12 +6,10 @@ use std::{
 use crate::{
     common::*,
     config::CullingMode,
-    math::BBox,
-    math_utils::{simd_clamp01, simd_rgb_to_srgb, simd_srgb_to_rgb},
     pipeline::Metrics,
     simd_config::*,
     texture::BorrowedMutTexture,
-    vec::{Vec, Vec2i, Vec3},
+    math::{Vec, Vec2i, Vec3, BBox, utils::{simd_clamp01, simd_rgb_to_srgb, simd_srgb_to_rgb}},
     Attributes, AttributesSimd, FragmentShaderSimd, IntoSimd, ScreenPos,
 };
 
@@ -264,21 +262,6 @@ fn orient_2d_step(
     let w = Simd::splat(u.x) * p.y - Simd::splat(u.y) * p.x + Simd::splat(c);
     let inc = Vec2i::from([-u.y * STEP_X, u.x * STEP_Y]).splat();
     (inc, w)
-}
-
-#[inline(always)]
-fn is_triangle_visible(p0_screen: Vec3, p1_screen: Vec3, p2_screen: Vec3, aabb: BBox<f32>) -> bool {
-    let inside_frustum =
-        is_inside_frustum_screen(p0_screen, p1_screen, p2_screen, aabb.width, aabb.height);
-
-    // Compute the normal `z` coordinate for backface culling
-    let nz = {
-        let u = p0_screen - p1_screen;
-        let v = p2_screen - p1_screen;
-        u.x * v.y - u.y * v.x
-    };
-
-    inside_frustum && nz < 0.0
 }
 
 #[inline(always)]

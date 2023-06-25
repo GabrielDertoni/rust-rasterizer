@@ -1,12 +1,83 @@
-use crate::vec::Vec;
+/// This doesn't really implement The Scanline Algorithm™️, but it is an algorithm that goes line by line and only inside each triangle.
 
-pub fn draw_triangle(
-    p0: Vec2i,
-    p1: Vec2i,
-    p2: Vec2i,
-    z0: f32,
-    z1: f32,
-    z2: f32,
+pub fn draw_triangles<V: Vertex>(
+    vert: &[V],
+    tris: &[[u32; 3]],
+    mut frag_shader: impl FnMut(V::Attr) -> Vec4,
+    mut pixels: PixelBuf,
+    mut depth_buf: MatrixSliceMut<f32>,
+) {
+    for [p0, p1, p2] in triangles_iter(vert, tris) {
+        draw_triangle(
+            p0,
+            p1,
+            p2,
+            &mut frag_shader,
+            pixels.borrow(),
+            depth_buf.borrow(),
+        )
+    }
+}
+
+pub fn draw_triangle<V: Vertex>(
+    v0: &V,
+    v1: &V,
+    v2: &V,
+    mut frag_shader: impl FnMut(V::Attr) -> Vec4,
+    mut pixels: PixelBuf,
+    mut depth_buf: MatrixSliceMut<f32>,
+) {
+    let p0 = v0.position();
+    let p1 = v1.position();
+    let p2 = v2.position();
+
+    let p0i = p0.xy().to_i32();
+    let p1i = p1.xy().to_i32();
+    let p2i = p2.xy().to_i32();
+
+    let min = p0i.min(p1i).min(p2i).max(Vec2i::repeat(0));
+    let max = p0i
+        .max(p1i)
+        .max(p2i)
+        .min(Vec2i::from([pixels.width as i32, pixels.height as i32]));
+
+    // 2 times the area of the triangle
+    let tri_area = orient_2d_i32(p0i, p1i, p2i) as f32;
+
+    if tri_area <= 0.0 {
+        return;
+    }
+
+    for y in min.y..=max.y {
+        for x in min.x..=max.x {
+            let p = Vec2i::from([x, y]);
+            let w = Vec3i::from([
+                orient_2d_i32(p1i, p2i, p),
+                orient_2d_i32(p2i, p0i, p),
+                orient_2d_i32(p0i, p1i, p),
+            ]);
+            if w.x >= 0 && w.y >= 0 && w.z >= 0 {
+                let w = w.to_f32() / tri_area;
+                let interp = V::interpolate(w, v0, v1, v2);
+                let idx = (x as usize, y as usize);
+                let z = w.x * p0.z + w.y * p1.z + w.z * p2.z;
+                if z > depth_buf[idx] {
+                    let color = frag_shader(interp).map(|el| el.clamp(-1.0, 1.0)) * 255.0;
+                    let color = color.to_u8();
+                    pixels[idx] = [color.x, color.y, color.z, color.w];
+                    depth_buf[idx] = z;
+                }
+            }
+        }
+    }
+}
+
+/*
+
+pub fn draw_triangle2(
+    p0: Vec4,
+    p1: Vec4,
+    p2: Vec4,
     color: u32,
     mut pixels: PixelBuf,
     mut depth_buf: MatrixSliceMut<f32>,
@@ -51,7 +122,7 @@ pub fn draw_triangle(
         let l = left_coef + y * left_dx / left_dy;
         let r = right_coef + y * right_dx / right_dy;
         for x in l..=r {
-            if !(x >= 0 && x <= pixels.width as i32 && y >= 0 && y < pixels.height as i32) {
+            if !(x >= 0 && x < pixels.width as i32 && y >= 0 && y < pixels.height as i32) {
                 continue;
             }
             let depth = triangle_depth((x, y), p0, p1, p2);
@@ -88,37 +159,5 @@ pub fn draw_triangle(
             }
         }
     }
-}
-
-/*
-pub fn draw_line(
-    p0: Vec4,
-    p1: Vec4,
-    color: u32,
-    mut pixels: PixelBuf,
-    mut depth_buf: MatrixSliceMut<f32>,
-) {
-    let p0 = to_screen_pos(p0);
-    let p1 = to_screen_pos(p1);
-    for (x, y, z) in LineIter::new(p0, p1) {
-        let idx = (x as usize, y as usize);
-        if z > depth_buf[idx] {
-            depth_buf[idx] = z;
-            pixels[idx] = color.to_be_bytes();
-        }
-    }
-}
-
-pub fn draw_triangle_outline(
-    p0: Vec4,
-    p1: Vec4,
-    p2: Vec4,
-    color: u32,
-    mut pixels: PixelBuf,
-    mut depth_buf: MatrixSliceMut<f32>,
-) {
-    draw_line(p0, p1, color, pixels.borrow(), depth_buf.borrow());
-    draw_line(p1, p2, color, pixels.borrow(), depth_buf.borrow());
-    draw_line(p0, p2, color, pixels.borrow(), depth_buf.borrow());
 }
 */

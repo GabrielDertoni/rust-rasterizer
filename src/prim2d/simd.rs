@@ -2,12 +2,10 @@ use std::simd::{Simd, SimdPartialOrd};
 
 use crate::{
     common::{count_cycles, orient_2d},
-    math::BBox,
-    math_utils::{simd_clamp01, simd_rgb_to_srgb, simd_srgb_to_rgb},
     pipeline::Metrics,
     simd_config::*,
     texture::BorrowedMutTexture,
-    vec::{Vec, Vec2i},
+    math::{Vec, Vec2i, BBox, utils::{simd_clamp01, simd_rgb_to_srgb, simd_srgb_to_rgb}},
     Attributes, AttributesSimd, FragmentShaderSimd, IntoSimd,
 };
 

@@ -3,7 +3,7 @@ use std::path::{PathBuf, Path};
 use serde::Deserialize;
 use anyhow::{Result, Context};
 
-use crate::{vec::{Vec3, Vec4}, utils::FpvCamera};
+use crate::{math::{Vec3, Vec4}, utils::FpvCamera};
 
 #[derive(Clone, Deserialize)]
 pub struct Scene {
@@ -167,14 +167,14 @@ impl RenderingConfig {
     }
 
     pub fn default_fog_color() -> Vec4 {
-        use crate::vec::Vec;
+        use crate::math::Vec;
 
         Vec::from(0x61_b7_e8_ff_u32.to_be_bytes()).map(|chan| chan as f32 / 255.)
     }
 
     fn deserialize_fog_color<'de, D: serde::Deserializer<'de>>(deser: D) -> Result<Vec4, D::Error> {
         use serde::de::Error;
-        use crate::vec::Vec;
+        use crate::math::Vec;
 
         let hex_color: &str = Deserialize::deserialize(deser)?;
         let rgb = u32::from_str_radix(hex_color.strip_prefix("#").unwrap_or(""), 16).map_err(Error::custom)?;
@@ -256,7 +256,7 @@ impl std::fmt::Display for CullingMode {
 mod detail {
     use serde::de::{Deserializer, Deserialize};
 
-    use crate::vec::Vec3;
+    use crate::math::Vec3;
 
     pub fn deser_vec3<'de, D>(deserializer: D) -> Result<Vec3, D::Error>
     where

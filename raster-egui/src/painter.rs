@@ -155,7 +155,7 @@ mod shaders {
 
     use rasterization::{
         texture::{BorrowedTexture, TextureWrap},
-        vec::{Vec, Vec2, Vec2i, Vec4, Vec4xN},
+        math::{Vec, Vec2, Vec2i, Vec4, Vec4xN},
         Attributes, AttributesSimd, IntoSimd, StructureOfArray,
     };
 

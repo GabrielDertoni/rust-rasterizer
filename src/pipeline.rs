@@ -5,10 +5,9 @@ use rayon::prelude::*;
 use crate::{
     common::count_cycles,
     config::CullingMode,
-    math::{BBox, Size},
+    math::{BBox, Size, Vec2i},
     simd_config::{SimdColorGamma, SimdPixels, LANES},
     texture::BorrowedMutTexture,
-    vec::Vec2i,
     vert_buf::VertBuf,
     Attributes, AttributesSimd, FragmentShader, FragmentShaderImpl, FragmentShaderSimd, VertexBuf,
     VertexShader,
@@ -128,7 +127,7 @@ where
     }
 
     pub fn take_color_buffer(&mut self) -> Option<BorrowedMutTexture<'a, [u8; 4]>> {
-        use crate::vec::Vec;
+        use crate::math::Vec;
 
         if self.mode.is_simd() {
             let mut color_buf = self.color_buf.take()?;

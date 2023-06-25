@@ -7,9 +7,9 @@ use std::{
 pub use index_layout::*;
 pub use storage::*;
 
-use crate::{
-    math_utils::{simd_clamp01, simd_wrap01, simd_srgb_to_rgb_f32},
-    vec::{Vec, Vec2, Vec2xN, Vec4xN}, math::Size,
+use crate::math::{
+    Vec, Vec2, Vec2xN, Vec4xN, Size,
+    utils::{simd_clamp01, simd_wrap01, simd_srgb_to_rgb_f32},
 };
 
 pub struct Texture<T, S, I = RowMajor, Width: Dim = SomeNat, Height: Dim = SomeNat> {

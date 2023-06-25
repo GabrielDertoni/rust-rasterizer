@@ -3,7 +3,7 @@ use std::ops::Range;
 
 use anyhow::{anyhow, Context, Result};
 
-use crate::vec::{self, Vec2, Vec3, Vec4};
+use crate::math::{self, Vec2, Vec3, Vec4};
 
 macro_rules! implies {
     ($a:expr => $b:expr) => {
@@ -188,14 +188,14 @@ impl Obj {
 
 fn parse_vertex_coords<'a, const N: usize>(
     it: impl Iterator<Item = &'a str>,
-) -> Result<vec::Vec<f32, N>> {
+) -> Result<math::Vec<f32, N>> {
     let v = it
         .map(|el| el.parse::<f32>())
         .collect::<Result<Vec<_>, _>>()?;
     let arr: [f32; N] = v
         .try_into()
         .map_err(|_| anyhow!("expected {N} coordinates"))?;
-    Ok(vec::Vec::from(arr))
+    Ok(math::Vec::from(arr))
 }
 
 fn parse_face_idxs<'a>(it: impl Iterator<Item = &'a str>, v: &mut Vec<[Index; 3]>) -> Result<()> {

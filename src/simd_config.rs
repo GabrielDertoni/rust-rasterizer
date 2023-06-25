@@ -1,6 +1,6 @@
 use std::simd::{Simd, Mask};
 
-use crate::vec::Vec;
+use crate::math::Vec;
 
 pub use lanes4::*;
 

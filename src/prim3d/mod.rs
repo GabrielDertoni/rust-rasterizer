@@ -4,7 +4,7 @@ pub(crate) mod simd;
 
 use crate::{
     Attributes, FragmentShader,
-    vec::{Vec, Vec2i, Vec3, Vec4},
+    math::{Vec, Vec2i, Vec3, Vec4},
     pipeline::Metrics,
     texture::BorrowedMutTexture,
     common::*, config::CullingMode, math::BBox,

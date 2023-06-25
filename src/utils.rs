@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-use crate::vec::{Mat3x3, Mat4x4, Vec3};
+use crate::math::{Mat3x3, Mat4x4, Vec3};
 
 #[macro_export]
 macro_rules! unroll_array {
