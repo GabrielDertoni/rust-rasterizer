@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [workspace]
-members = ["macros", "raster-egui", "examples/scene"]
+members = ["macros", "egui-backend"]
 
 [workspace.dependencies]
 image = { version = "0.24", default-features = false, features = ["png", "jpeg"] }
@@ -21,7 +21,6 @@ performance-counters = []
 
 [dependencies]
 anyhow.workspace = true
-pixels.workspace = true
 winit.workspace = true
 image.workspace = true
 rayon.workspace = true
@@ -30,6 +29,7 @@ toml.workspace = true
 serde.workspace = true
 
 [dev-dependencies]
+pixels.workspace = true
 criterion = { version = "0.4", features = ["html_reports"] }
 core_affinity = "0.8.0"
 notify = { version = "6.0.0", default-features = false, features = ["macos_fsevent"] }
