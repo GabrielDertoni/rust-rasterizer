@@ -3,13 +3,11 @@
 mod painter;
 
 use egui_winit::winit::{
-    dpi::{LogicalSize, PhysicalSize},
+    dpi::PhysicalSize,
     event::{Event, WindowEvent},
-    event_loop::EventLoop,
-    window::{Window, WindowBuilder},
+    window::Window,
 };
 use egui_winit::egui;
-use pixels::{Pixels, SurfaceTexture};
 
 use painter::Painter;
 use rasterization::texture::BorrowedMutTexture;
@@ -23,11 +21,16 @@ pub struct Options {
     pub window_size: Option<(u32, u32)>,
 }
 
+#[cfg(feature = "event-loop")]
 pub fn run_default<A: App>(screen_name: &str, app: A) -> ! {
     run(screen_name, Default::default(), app)
 }
 
+#[cfg(feature = "event-loop")]
 pub fn run<A: App>(screen_name: &str, options: Options, mut app: A) -> ! {
+    use pixels::{Pixels, SurfaceTexture};
+    use egui_winit::winit::{dpi::LogicalSize, event_loop::EventLoop, window::WindowBuilder};
+
     let (width, height) = options.window_size.unwrap_or((600, 400));
 
     let event_loop = EventLoop::new();
